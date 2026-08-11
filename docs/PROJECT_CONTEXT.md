@@ -107,13 +107,75 @@ immediately. A response without a parseable Mermaid block sets
 `mermaid_code=None` and `error`, while keeping `raw_model_output` for
 debugging.
 
-### Notes for Phase 3+
+### Notes from Phase 2 (partially superseded by Phase 3)
 
-- `google-generativeai` (0.8.6) is Google's deprecated legacy SDK (EOL
-  notice on import). Consider migrating `gemini_provider.py` to the
-  `google-genai` SDK — the provider isolation means nothing else changes.
 - Test fixtures use the REAL samples in `samples/` (flowchart PNG appears
   in the DOCX at question 80). There is no real PDF sample; the PDF test
   builds one on the fly from the real assets (see `tests/conftest.py`).
-- The Gemini prompt in `gemini_provider.py` is a first working version —
-  prompt refinement and Mermaid render-validation are Phase 3 work.
+
+## Phase 3 additions (structured diagrams, layout engine, native PPTX)
+
+### Architecture pivot: structured JSON, native editable shapes
+
+Mermaid output (Phase 2) is GONE. Diagrams must become **natively
+editable shapes** in the output file (click-to-edit boxes and text), not
+embedded images. The vision model now returns a structured
+``DiagramGraph`` (topology + text only); geometry is computed
+deterministically downstream.
+
+### Schema (`app/models/diagram.py`)
+
+- `DiagramNode`: id, shape_type (`ShapeType`: TERMINATOR, PROCESS,
+  DECISION, INPUT_OUTPUT), text (Azerbaijani preserved exactly).
+- `DiagramEdge`: source_id, target_id, label (`"Hə"`/`"Yox"`/None),
+  is_back_edge (set by the layout engine, False from the vision model).
+- `DiagramGraph`: nodes + edges — what the vision provider returns
+  (`VisionResult.diagram_graph`, which replaced `mermaid_code`).
+- `LayoutedNode` (= DiagramNode + x/y/width/height, layout px, top-left
+  origin) and `LayoutedGraph` — what renderers consume.
+
+### Vision provider (migrated to `google-genai` SDK)
+
+The deprecated `google-generativeai` SDK was replaced with `google-genai`
+in Phase 3: its TypedDict→schema conversion was broken (the model
+consistently omitted the `edges` array). `google-genai` takes the
+pydantic `DiagramGraph` directly as `response_schema` and works
+first-try. JSON mode + schema enforcement; invalid/incomplete JSON is
+retried like a transient error (same ×2 budget), then reported via
+`VisionResult(error=...)` — the never-raise pattern is unchanged.
+
+### Layout engine (`app/core/layout.py`) — rule-based, deterministic
+
+1. Start node (no incoming edges) tops a single centre column; the main
+   flow runs top-to-bottom.
+2. A node with ≥2 outgoing edges (a decision) sends its first edge's
+   target into a left sub-column, the second into a right sub-column,
+   both one row below.
+3. An edge whose target sits at/above its source's row is flagged
+   `is_back_edge`; renderers route it around the columns.
+4. Fixed sizes per shape (PROCESS/INPUT_OUTPUT 160×50, DECISION 180×90,
+   TERMINATOR 140×50 px), widened when text won't fit at 12 pt.
+
+### Renderers (`app/core/render/`)
+
+- `svg_debug.py` — INTERNAL QA ONLY (future review panel). Never the
+  client deliverable. Correct symbols, arrow markers, back-edge routed on
+  a right-hand rail with a ↻ icon.
+- `pptx_shapes.py` — the client deliverable for diagrams. Mapping:
+  TERMINATOR → `MSO_SHAPE.ROUNDED_RECTANGLE`, PROCESS → `RECTANGLE`,
+  DECISION → `DIAMOND`, INPUT_OUTPUT → `PARALLELOGRAM`. Real text frames
+  (editable, Azerbaijani intact), native connectors attached via
+  `begin_connect`/`end_connect` (arrows follow dragged shapes),
+  back-edges as elbow connectors right-side to right-side, edge labels as
+  small borderless text boxes. 1 layout px = 9525 EMU; diagrams are
+  uniformly scaled down (never up) to fit the given slide bounds.
+
+### DOCX native shapes — DEFERRED TO PHASE 4 (do not re-litigate)
+
+python-pptx has first-class AutoShape/connector APIs, so PPTX was built
+first to prove the shape model. python-docx has NO equivalent — native
+shapes in .docx require hand-building OOXML DrawingML
+(`w:drawing`/`wps:wsp`) XML and injecting it into the body. That is a
+separate, harder task and gets its own phase now that the shape model is
+proven. Full document assembly (mixing text/tables/diagrams into one
+output) is also still pending.

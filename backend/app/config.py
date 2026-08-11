@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     )
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.1-flash-lite"
     environment: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
     max_upload_size_mb: int = 30

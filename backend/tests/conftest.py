@@ -5,7 +5,40 @@ from pathlib import Path
 import pymupdf
 import pytest
 
+from app.models.diagram import DiagramEdge, DiagramGraph, DiagramNode, ShapeType
+
 SAMPLES_DIR = Path(__file__).resolve().parents[2] / "samples"
+
+
+@pytest.fixture(scope="session")
+def flowchart_graph() -> DiagramGraph:
+    """The real flowchart sample's known structure (question 80).
+
+    8 nodes, one decision with two branches, one back-edge
+    (a = a + 16 loops back to the decision).
+    """
+    return DiagramGraph(
+        nodes=[
+            DiagramNode(id="n1", shape_type=ShapeType.TERMINATOR, text="Başlanğıc"),
+            DiagramNode(id="n2", shape_type=ShapeType.INPUT_OUTPUT, text="n"),
+            DiagramNode(id="n3", shape_type=ShapeType.PROCESS, text="a = 3"),
+            DiagramNode(id="n4", shape_type=ShapeType.DECISION, text="a < 164"),
+            DiagramNode(id="n5", shape_type=ShapeType.INPUT_OUTPUT, text="n"),
+            DiagramNode(id="n6", shape_type=ShapeType.TERMINATOR, text="Son"),
+            DiagramNode(id="n7", shape_type=ShapeType.PROCESS, text="n = n - 8"),
+            DiagramNode(id="n8", shape_type=ShapeType.PROCESS, text="a = a + 16"),
+        ],
+        edges=[
+            DiagramEdge(source_id="n1", target_id="n2"),
+            DiagramEdge(source_id="n2", target_id="n3"),
+            DiagramEdge(source_id="n3", target_id="n4"),
+            DiagramEdge(source_id="n4", target_id="n5", label="Yox"),
+            DiagramEdge(source_id="n5", target_id="n6"),
+            DiagramEdge(source_id="n4", target_id="n7", label="Hə"),
+            DiagramEdge(source_id="n7", target_id="n8"),
+            DiagramEdge(source_id="n8", target_id="n4"),
+        ],
+    )
 
 
 @pytest.fixture(scope="session")

@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from app.models.diagram import DiagramGraph
+
 
 class ElementKind(str, Enum):
     """Physical kind of content found in a source document."""
@@ -72,6 +74,6 @@ class VisionResult(BaseModel):
     """
 
     raw_model_output: str = ""
-    mermaid_code: str | None = None
+    diagram_graph: DiagramGraph | None = None
     confidence_note: str | None = None
     error: str | None = None

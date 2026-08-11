@@ -1,74 +1,78 @@
 """Gemini implementation of the vision provider interface.
 
-This is the only module in the codebase allowed to import
-``google.generativeai``.
+This is the only module in the codebase allowed to import the Gemini SDK
+(``google-genai``).
 """
 
 import logging
-import re
 import time
 
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
+from pydantic import ValidationError
 
 from app.config import get_settings
 from app.core.vision.base import VisionProvider
+from app.models.diagram import DiagramGraph
 from app.models.document import VisionResult
 
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 2
 _RETRY_DELAY_SECONDS = 2.0
-_REQUEST_TIMEOUT_SECONDS = 60
+_REQUEST_TIMEOUT_MS = 60_000
 
-_TRANSIENT_ERRORS = (
-    google_exceptions.ResourceExhausted,
-    google_exceptions.ServiceUnavailable,
-    google_exceptions.DeadlineExceeded,
-    google_exceptions.InternalServerError,
-    ConnectionError,
-    TimeoutError,
-)
+_TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 
 _PROMPT = """\
 You are given a scanned image of an algorithm flowchart from an Azerbaijani \
-school informatics test.
-
-Convert it into Mermaid flowchart syntax (`flowchart TD`).
+school informatics test. Extract its structure as JSON.
 
 Rules:
-- Preserve every text label EXACTLY as written, in Azerbaijani \
-(e.g. "Başlanğıc", "Son", "Hə", "Yox"). Do not translate or correct anything.
-- Preserve arrow directions and branch labels exactly (decision branches \
-like "Hə"/"Yox" become edge labels, e.g. -->|Hə|).
-- Use matching node shapes: rounded/stadium ([...]) for start/end, \
-parallelogram (/.../) for input/output, rectangle for process steps, \
-diamond ({...}) for decisions.
-- Represent loops with an edge back to the decision node, exactly as drawn.
-- Output ONLY a single fenced ```mermaid code block, nothing else.
+- One node per flowchart symbol. shape_type must be one of:
+  "terminator" (oval/stadium, e.g. Başlanğıc / Son),
+  "process" (rectangle, e.g. assignments),
+  "decision" (diamond, conditions),
+  "input_output" (parallelogram, input or output of a variable).
+- "text" must contain the label EXACTLY as written, in Azerbaijani \
+(e.g. "Başlanğıc", "Son", "a = 3"). Do not translate or correct anything.
+- One edge per arrow, in the arrow's direction. Branch labels written on \
+arrows (e.g. "Hə", "Yox") go in that edge's "label"; set label to null \
+when the arrow has no label.
+- Give nodes short ids: "n1", "n2", ... in reading order (top to bottom).
+- Include loop-back arrows as ordinary edges pointing at the earlier node.
+- The JSON object MUST contain BOTH keys: "nodes" AND "edges". A flowchart
+  always has arrows, so "edges" must not be empty or omitted.
 """
 
-_MERMAID_FENCE_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
+
+def _is_transient(exc: Exception) -> bool:
+    """Return True for errors worth retrying (rate limits, 5xx, network)."""
+    if isinstance(exc, genai_errors.APIError):
+        return exc.code in _TRANSIENT_HTTP_CODES
+    return isinstance(exc, ConnectionError | TimeoutError)
 
 
-def parse_mermaid(raw_output: str) -> str | None:
-    """Extract Mermaid code from a model response, or None if absent.
+def parse_diagram_graph(raw_output: str) -> DiagramGraph | None:
+    """Validate a JSON model response into a DiagramGraph, or None.
 
-    Accepts either a fenced ```mermaid block or a bare response that
-    starts with a Mermaid diagram keyword.
+    Empty edge labels are normalised to ``None``.
     """
-    match = _MERMAID_FENCE_RE.search(raw_output)
-    if match:
-        code = match.group(1).strip()
-        return code or None
-    stripped = raw_output.strip()
-    if stripped.startswith(("flowchart", "graph")):
-        return stripped
-    return None
+    try:
+        graph = DiagramGraph.model_validate_json(raw_output)
+    except ValidationError:
+        return None
+    for edge in graph.edges:
+        if edge.label is not None and not edge.label.strip():
+            edge.label = None
+    if not graph.nodes:
+        return None
+    return graph
 
 
 class GeminiVisionProvider(VisionProvider):
-    """Diagram analysis backed by the Google Gemini API."""
+    """Diagram analysis backed by the Google Gemini API (JSON mode)."""
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -76,33 +80,58 @@ class GeminiVisionProvider(VisionProvider):
             raise ValueError(
                 "GEMINI_API_KEY is not configured; cannot create Gemini provider."
             )
-        genai.configure(api_key=settings.gemini_api_key)  # type: ignore[attr-defined]
-        self._model = genai.GenerativeModel(  # type: ignore[attr-defined]
-            settings.gemini_model
-        )
+        self._client = genai.Client(api_key=settings.gemini_api_key)
         self._model_name = settings.gemini_model
+        self._config = genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=DiagramGraph,
+            http_options=genai_types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
+        )
 
     def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
-        """Ask Gemini to reconstruct the flowchart image as Mermaid code."""
+        """Ask Gemini to extract the flowchart structure as a DiagramGraph."""
         prompt = _PROMPT
         if context:
             prompt += (
                 "\nSurrounding text from the source document (for label "
-                f"context only, do not include it in the diagram):\n{context}"
+                f"context only, do not add it to the diagram):\n{context}"
             )
-        parts = [prompt, {"mime_type": "image/png", "data": image}]
+        contents: list[str | genai_types.Part] = [
+            genai_types.Part.from_bytes(data=image, mime_type="image/png"),
+            prompt,
+        ]
 
         last_error: Exception | None = None
+        raw_output = ""
+        graph: DiagramGraph | None = None
         for attempt in range(1 + _MAX_RETRIES):
             try:
-                response = self._model.generate_content(
-                    parts,
-                    request_options={"timeout": _REQUEST_TIMEOUT_SECONDS},
+                response = self._client.models.generate_content(
+                    model=self._model_name,
+                    # mypy: the SDK's contents union spells Image as
+                    # PIL.Image.Image; our narrower list is fine at runtime.
+                    contents=contents,  # type: ignore[arg-type]
+                    config=self._config,
                 )
-                raw_output = response.text
-                break
-            except _TRANSIENT_ERRORS as exc:
+                raw_output = response.text or ""
+                graph = parse_diagram_graph(raw_output)
+                if graph is not None:
+                    break
+                # Invalid/incomplete JSON is treated like a transient
+                # failure: the model often produces a complete graph on a
+                # second attempt.
+                logger.warning(
+                    "Model returned invalid DiagramGraph JSON (attempt %d/%d)",
+                    attempt + 1,
+                    1 + _MAX_RETRIES,
+                )
+                if attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY_SECONDS)
+            except Exception as exc:  # noqa: BLE001 - must not crash pipeline
                 last_error = exc
+                if not _is_transient(exc):
+                    logger.exception("Gemini call failed permanently")
+                    return VisionResult(error=f"{type(exc).__name__}: {exc}")
                 logger.warning(
                     "Transient Gemini error (attempt %d/%d): %s",
                     attempt + 1,
@@ -111,30 +140,28 @@ class GeminiVisionProvider(VisionProvider):
                 )
                 if attempt < _MAX_RETRIES:
                     time.sleep(_RETRY_DELAY_SECONDS * (attempt + 1))
-            except Exception as exc:  # noqa: BLE001 - must not crash pipeline
-                logger.exception("Gemini call failed permanently")
-                return VisionResult(error=f"{type(exc).__name__}: {exc}")
         else:
-            return VisionResult(
-                error=(
-                    f"Gemini call failed after {1 + _MAX_RETRIES} attempts: "
-                    f"{type(last_error).__name__}: {last_error}"
+            if last_error is not None:
+                return VisionResult(
+                    raw_model_output=raw_output,
+                    error=(
+                        f"Gemini call failed after {1 + _MAX_RETRIES} attempts: "
+                        f"{type(last_error).__name__}: {last_error}"
+                    ),
                 )
+            return VisionResult(
+                raw_model_output=raw_output,
+                error=(
+                    "Model response was not a valid DiagramGraph JSON "
+                    f"after {1 + _MAX_RETRIES} attempts."
+                ),
             )
 
-        mermaid_code = parse_mermaid(raw_output)
-        confidence_note = None
-        error = None
-        if mermaid_code is None:
-            error = "Model response did not contain Mermaid code."
-        else:
-            confidence_note = (
-                f"Generated by {self._model_name}; not yet validated by a "
-                "Mermaid renderer."
-            )
         return VisionResult(
             raw_model_output=raw_output,
-            mermaid_code=mermaid_code,
-            confidence_note=confidence_note,
-            error=error,
+            diagram_graph=graph,
+            confidence_note=(
+                f"Generated by {self._model_name}; geometry not included — "
+                "layout is computed downstream."
+            ),
         )

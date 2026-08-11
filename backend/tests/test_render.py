@@ -106,13 +106,23 @@ class TestPptxShapes:
         prs = Presentation(str(path))
         slide = prs.slides[0]
         connectors = [s for s in slide.shapes if isinstance(s, Connector)]
-        assert len(connectors) == len(flowchart_graph.edges)
+        # 7 forward edges (one connector each) + the back-edge as an
+        # explicit 3-segment rail route = 10 connectors.
+        forward_edges = [e for e in flowchart_graph.edges]
+        assert len(connectors) == (len(forward_edges) - 1) + 3
         # Attachment is stored as a:stCxn / a:endCxn in the connector XML.
         ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
-        for connector in connectors:
-            xml = connector._element
-            assert xml.find(".//a:stCxn", ns) is not None
-            assert xml.find(".//a:endCxn", ns) is not None
+        st_attached = sum(
+            1 for c in connectors if c._element.find(".//a:stCxn", ns) is not None
+        )
+        end_attached = sum(
+            1 for c in connectors if c._element.find(".//a:endCxn", ns) is not None
+        )
+        # Every forward connector is attached at both ends; the back-edge
+        # chain is attached at its outermost ends only (first segment's
+        # begin on the source, last segment's end on the target).
+        assert st_attached == (len(forward_edges) - 1) + 1
+        assert end_attached == (len(forward_edges) - 1) + 1
 
     def test_edge_labels_become_text_boxes(
         self, flowchart_graph: DiagramGraph, tmp_path: Path

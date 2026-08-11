@@ -10,6 +10,7 @@ import logging
 
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.shapes.base import BaseShape
 from pptx.slide import Slide
 from pptx.util import Emu, Pt
 
@@ -106,14 +107,33 @@ def add_diagram_to_slide(
         target_node = graph.node_by_id(edge.target_id)
 
         if edge.is_back_edge:
-            # Loop: leave the source's right side, come back into the
-            # target's right side, elbow-routed around the column.
-            connector = slide.shapes.add_connector(
-                MSO_CONNECTOR.ELBOW, Emu(0), Emu(0), Emu(0), Emu(0)
+            # PowerPoint's bentConnector auto-routing draws this loop
+            # through the middle of the diagram, so the route is built
+            # manually as three straight segments on a vertical rail to
+            # the right of all shapes — mirroring svg_debug.py's routing.
+            _add_back_edge(
+                slide,
+                source,
+                target,
+                source_node,
+                target_node,
+                rail_x=_rail_x(graph),
+                scale=scale,
+                offset_x_emu=offset_x_emu,
+                offset_y_emu=offset_y_emu,
             )
-            connector.begin_connect(source, _CXN_RIGHT)
-            connector.end_connect(target, _CXN_RIGHT)
-        elif (
+            if edge.label:
+                _add_edge_label(
+                    slide,
+                    edge.label,
+                    source_node,
+                    target_node,
+                    scale,
+                    offset_x_emu,
+                    offset_y_emu,
+                )
+            continue
+        if (
             abs(
                 (source_node.x + source_node.width / 2)
                 - (target_node.x + target_node.width / 2)
@@ -151,6 +171,62 @@ def add_diagram_to_slide(
         len(shapes_by_id),
         len(graph.edges),
     )
+
+
+# Distance (layout px) of the back-edge rail right of the rightmost shape,
+# matching svg_debug.py's _BACK_EDGE_OFFSET.
+_RAIL_OFFSET_PX = 50.0
+
+
+def _rail_x(graph: LayoutedGraph) -> float:
+    """Layout-px x of the vertical rail back-edges are routed along."""
+    return max(n.x + n.width for n in graph.nodes) + _RAIL_OFFSET_PX
+
+
+def _add_back_edge(
+    slide: Slide,
+    source: BaseShape,
+    target: BaseShape,
+    source_node: LayoutedNode,
+    target_node: LayoutedNode,
+    *,
+    rail_x: float,
+    scale: float,
+    offset_x_emu: int,
+    offset_y_emu: int,
+) -> None:
+    """Route a loop as three explicit straight segments around the diagram.
+
+    source right-mid → (rail, source y) → (rail, target y) → target
+    right-mid. The first segment stays attached to the source shape and
+    the last to the target shape; the rail waypoints are fixed
+    coordinates, never auto-routed.
+    """
+
+    def ex(px: float) -> Emu:
+        return Emu(offset_x_emu + int(px * scale * _EMU_PER_PX))
+
+    def ey(px: float) -> Emu:
+        return Emu(offset_y_emu + int(px * scale * _EMU_PER_PX))
+
+    sx = source_node.x + source_node.width
+    sy = source_node.y + source_node.height / 2
+    tx = target_node.x + target_node.width
+    ty = target_node.y + target_node.height / 2
+
+    out = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT, ex(sx), ey(sy), ex(rail_x), ey(sy)
+    )
+    out.begin_connect(source, _CXN_RIGHT)
+    up = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT, ex(rail_x), ey(sy), ex(rail_x), ey(ty)
+    )
+    back_in = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT, ex(rail_x), ey(ty), ex(tx), ey(ty)
+    )
+    back_in.end_connect(target, _CXN_RIGHT)
+    for segment in (out, up, back_in):
+        segment.line.width = Pt(1.5)
 
 
 def _add_edge_label(

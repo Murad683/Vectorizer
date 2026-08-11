@@ -17,3 +17,8 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_decorators = false
+
+# PyMuPDF ships partial typing; its constructors are untyped.
+[[tool.mypy.overrides]]
+module = "app.core.ingestion.pdf_extractor"
+disallow_untyped_calls = false

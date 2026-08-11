@@ -67,3 +67,53 @@ embeds.
 
 Future phases must follow these conventions rather than introducing new
 patterns.
+
+## Phase 2 additions (ingestion + classifier + vision provider)
+
+### What exists now
+
+- `app/core/ingestion/` — `Extractor` ABC with `PdfExtractor` (PyMuPDF)
+  and `DocxExtractor` (python-docx); `get_extractor(path)` dispatches by
+  extension. Extractors preserve reading order and skip (log) broken
+  elements instead of raising.
+- `app/core/classifier.py` — rule-based, zero-cost classification.
+- `app/core/vision/` — `VisionProvider` ABC + `GeminiVisionProvider`
+  (google-generativeai SDK, retry ×2 on transient errors, 60 s timeout);
+  `get_vision_provider()` is the factory. **Only
+  `vision/gemini_provider.py` may import the Gemini SDK.**
+- `app/models/document.py` — `ExtractedElement` (with `ElementKind`
+  image/text_block and a free-form `metadata` dict for extractor hints),
+  `ClassifiedElement`, `ElementType` (DIAGRAM/TEXT/TABLE), `VisionResult`.
+- `scripts/validate_vision.py` — one-shot manual pipeline validation on
+  the flowchart sample.
+
+### Classifier rule list (ordered; first match wins)
+
+1. `rule_image_is_diagram` — any image element → DIAGRAM
+2. `rule_table_text` — text with `metadata["is_table"]` → TABLE
+3. `rule_plain_text` — remaining text → TEXT
+
+New rules are added by inserting a `Rule` function
+(`ExtractedElement -> ElementType | None`, None = abstain) into the chain
+— e.g. a future photo-vs-diagram rule goes before `rule_image_is_diagram`.
+
+### VisionResult error-handling pattern
+
+Vision providers NEVER raise on API/parsing failures. They return
+`VisionResult(error=...)`; upstream stages decide what to do (retry,
+embed the original image as-is, flag for review). Transient API errors
+are retried at most twice inside the provider; permanent errors return
+immediately. A response without a parseable Mermaid block sets
+`mermaid_code=None` and `error`, while keeping `raw_model_output` for
+debugging.
+
+### Notes for Phase 3+
+
+- `google-generativeai` (0.8.6) is Google's deprecated legacy SDK (EOL
+  notice on import). Consider migrating `gemini_provider.py` to the
+  `google-genai` SDK — the provider isolation means nothing else changes.
+- Test fixtures use the REAL samples in `samples/` (flowchart PNG appears
+  in the DOCX at question 80). There is no real PDF sample; the PDF test
+  builds one on the fly from the real assets (see `tests/conftest.py`).
+- The Gemini prompt in `gemini_provider.py` is a first working version —
+  prompt refinement and Mermaid render-validation are Phase 3 work.

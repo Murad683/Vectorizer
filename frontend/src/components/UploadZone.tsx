@@ -78,7 +78,7 @@ export default function UploadZone({ onUploaded }: Props) {
           border-2 border-dashed rounded-xl px-6 py-10 text-center cursor-pointer transition-all
           ${dragging
             ? 'border-accent bg-accent/5'
-            : 'border-border hover:border-dark-secondary/30'
+            : 'border-border hover:border-border-strong hover:bg-surface/50'
           }
           ${uploading ? 'pointer-events-none opacity-60' : ''}
         `}
@@ -93,8 +93,8 @@ export default function UploadZone({ onUploaded }: Props) {
 
         {uploading ? (
           <>
-            <div className="w-6 h-6 border-2 border-dark/20 border-t-dark rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-sm text-dark-secondary">Yüklənir...</p>
+            <div className="w-6 h-6 border-2 border-ink/20 border-t-ink rounded-full animate-spin mx-auto mb-3" />
+            <p className="text-sm text-ink-secondary">Yüklənir...</p>
           </>
         ) : (
           <>
@@ -103,8 +103,8 @@ export default function UploadZone({ onUploaded }: Props) {
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z" />
               </svg>
             </div>
-            <p className="text-sm text-dark-secondary mb-1">
-              Faylı bura sürükləyin və ya <span className="text-dark font-medium underline underline-offset-2">seçin</span>
+            <p className="text-sm text-ink-secondary mb-1">
+              Faylı bura sürükləyin və ya <span className="text-ink font-medium underline underline-offset-2">seçin</span>
             </p>
             <p className="text-xs text-muted">
               PDF, DOCX &middot; maks. {MAX_SIZE_MB} MB

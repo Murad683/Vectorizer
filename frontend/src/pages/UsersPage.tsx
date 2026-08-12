@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { api, ApiError } from '../api/client';
 import type { UserResponse } from '../api/client';
+import ThemeToggle from '../components/ThemeToggle';
 
 function UserRow({
   u,
@@ -27,7 +28,7 @@ function UserRow({
   return (
     <div className="py-3.5 flex items-center justify-between first:pt-0 last:pb-0 gap-3">
       <div className="min-w-0">
-        <p className="text-sm text-dark truncate">{u.email}</p>
+        <p className="text-sm text-ink truncate">{u.email}</p>
         <p className="text-xs text-muted mt-0.5">
           {new Date(u.created_at).toLocaleDateString('az-AZ')}
           {!u.is_active && <span className="text-error ml-2">Deaktiv</span>}
@@ -36,7 +37,7 @@ function UserRow({
       <div className="flex items-center gap-2 shrink-0">
         <span
           className={`text-xs font-medium px-2.5 py-1 rounded-full ${
-            u.role === 'admin' ? 'bg-accent/20 text-dark-secondary' : 'bg-surface text-muted'
+            u.role === 'admin' ? 'bg-accent/20 text-ink-secondary' : 'bg-surface text-muted'
           }`}
         >
           {u.role === 'admin' ? 'Admin' : 'İstifadəçi'}
@@ -46,7 +47,7 @@ function UserRow({
           onClick={() => onToggleActive(u)}
           disabled={isSelf}
           title={isSelf ? 'Öz hesabınızı deaktiv edə bilməzsiniz' : undefined}
-          className="text-xs font-medium border border-border rounded-lg px-2.5 py-1.5 hover:bg-surface transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          className="text-xs font-medium border border-border rounded-lg px-2.5 py-1.5 hover:bg-surface-hover hover:border-border-strong transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:border-border"
         >
           {u.is_active ? 'Deaktiv et' : 'Aktivləşdir'}
         </button>
@@ -153,7 +154,7 @@ export default function UsersPage() {
   }
 
   return (
-    <div className="min-h-svh bg-white">
+    <div className="min-h-svh bg-canvas">
       <header className="border-b border-border">
         <div className="max-w-2xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
@@ -164,17 +165,18 @@ export default function UsersPage() {
               <div className="relative w-5 h-5">
                 <div className="vectorize-shape absolute inset-0 bg-accent" />
               </div>
-              <span className="text-sm font-semibold tracking-tight text-dark">Vectorizer</span>
+              <span className="text-sm font-semibold tracking-tight text-ink">Vectorizer</span>
             </button>
-            <span className="text-border">/</span>
+            <span className="text-border-strong">/</span>
             <span className="text-sm text-muted">İstifadəçilər</span>
           </div>
 
           <div className="flex items-center gap-3">
+            <ThemeToggle />
             <span className="text-xs text-muted hidden sm:inline">{user?.email}</span>
             <button
               onClick={logout}
-              className="text-xs text-dark-secondary hover:text-dark transition-colors cursor-pointer"
+              className="text-xs text-ink-secondary hover:text-ink transition-colors cursor-pointer"
             >
               Çıxış
             </button>
@@ -190,7 +192,7 @@ export default function UsersPage() {
           {!showForm && (
             <button
               onClick={() => setShowForm(true)}
-              className="text-xs font-medium text-dark-secondary border border-border rounded-lg px-3 py-1.5 hover:bg-surface transition-colors cursor-pointer"
+              className="text-xs font-medium text-ink-secondary border border-border rounded-lg px-3 py-1.5 hover:bg-surface-hover hover:border-border-strong transition-colors cursor-pointer"
             >
               + Yeni istifadəçi
             </button>
@@ -198,7 +200,7 @@ export default function UsersPage() {
         </div>
 
         {showForm && (
-          <form onSubmit={handleCreate} className="mb-8 border border-border rounded-xl p-5 space-y-4">
+          <form onSubmit={handleCreate} className="mb-8 bg-panel border border-border rounded-xl p-5 space-y-4 shadow-sm">
             {error && (
               <div className="text-sm text-error bg-error/10 rounded-lg px-4 py-3">
                 {error}
@@ -213,7 +215,7 @@ export default function UsersPage() {
                   required
                   value={email}
                   onChange={e => setEmail(e.target.value)}
-                  className="w-full rounded-lg border border-border px-3 py-2 text-sm outline-none focus:border-dark-secondary/40 transition-colors"
+                  className="w-full rounded-lg bg-surface border border-border px-3 py-2 text-sm text-ink outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/30 transition-colors"
                 />
               </div>
               <div>
@@ -225,7 +227,7 @@ export default function UsersPage() {
                   minLength={4}
                   value={password}
                   onChange={e => setPassword(e.target.value)}
-                  className="w-full rounded-lg border border-border px-3 py-2 text-sm outline-none focus:border-dark-secondary/40 transition-colors"
+                  className="w-full rounded-lg bg-surface border border-border px-3 py-2 text-sm text-ink outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/30 transition-colors"
                 />
               </div>
             </div>
@@ -235,7 +237,7 @@ export default function UsersPage() {
                 id="new-role"
                 value={role}
                 onChange={e => setRole(e.target.value as 'admin' | 'member')}
-                className="w-full rounded-lg border border-border px-3 py-2 text-sm outline-none focus:border-dark-secondary/40 transition-colors bg-white cursor-pointer"
+                className="w-full rounded-lg bg-surface border border-border px-3 py-2 text-sm text-ink outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/30 transition-colors cursor-pointer"
               >
                 <option value="member">İstifadəçi</option>
                 <option value="admin">Admin</option>
@@ -245,14 +247,14 @@ export default function UsersPage() {
               <button
                 type="button"
                 onClick={() => { setShowForm(false); setError(''); }}
-                className="text-sm text-dark-secondary px-4 py-2 rounded-lg hover:bg-surface transition-colors cursor-pointer"
+                className="text-sm text-ink-secondary px-4 py-2 rounded-lg hover:bg-surface-hover transition-colors cursor-pointer"
               >
                 Ləğv et
               </button>
               <button
                 type="submit"
                 disabled={saving}
-                className="text-sm font-medium bg-dark text-white px-4 py-2 rounded-lg hover:bg-dark-secondary transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-wait"
+                className="text-sm font-medium bg-accent text-accent-ink px-4 py-2 rounded-lg hover:brightness-110 active:brightness-95 transition-all disabled:opacity-50 cursor-pointer disabled:cursor-wait"
               >
                 {saving ? 'Yaradılır...' : 'Yarat'}
               </button>

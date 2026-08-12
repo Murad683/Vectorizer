@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { ApiError } from '../api/client';
+import ThemeToggle from '../components/ThemeToggle';
 
 export default function LoginPage() {
   const { login, loading } = useAuth();
@@ -24,19 +25,23 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-svh flex items-center justify-center bg-dark px-4">
+    <div className="min-h-svh flex items-center justify-center bg-canvas px-4 relative">
+      <div className="absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
+
       <div className="w-full max-w-sm">
         {/* Signature element: pixelated shape morphing to clean vector */}
-        <div className="flex justify-center mb-10">
+        <div className="flex justify-center mb-8">
           <div className="relative w-16 h-16">
             <div className="vectorize-shape absolute inset-0 bg-accent" />
           </div>
         </div>
 
-        <h1 className="text-white text-2xl font-semibold tracking-tight text-center mb-1">
+        <h1 className="font-display text-ink text-4xl text-center mb-2 tracking-tight">
           Vectorizer
         </h1>
-        <p className="text-muted text-sm text-center mb-8">
+        <p className="text-muted text-sm text-center mb-9">
           Test materiallarını vektor formatına çevirin
         </p>
 
@@ -48,7 +53,7 @@ export default function LoginPage() {
           )}
 
           <div>
-            <label htmlFor="email" className="block text-sm text-gray-400 mb-1.5">
+            <label htmlFor="email" className="block text-sm text-muted mb-1.5">
               E-poçt
             </label>
             <input
@@ -59,13 +64,13 @@ export default function LoginPage() {
               autoComplete="email"
               value={email}
               onChange={e => setEmail(e.target.value)}
-              className="w-full rounded-lg bg-white/5 border border-white/10 px-4 py-2.5 text-white text-sm placeholder:text-gray-600 outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-colors"
+              className="w-full rounded-lg bg-surface border border-border px-4 py-2.5 text-ink text-sm placeholder:text-muted outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/30 transition-colors"
               placeholder="admin@vectorizer.local"
             />
           </div>
 
           <div>
-            <label htmlFor="password" className="block text-sm text-gray-400 mb-1.5">
+            <label htmlFor="password" className="block text-sm text-muted mb-1.5">
               Şifrə
             </label>
             <input
@@ -75,14 +80,14 @@ export default function LoginPage() {
               autoComplete="current-password"
               value={password}
               onChange={e => setPassword(e.target.value)}
-              className="w-full rounded-lg bg-white/5 border border-white/10 px-4 py-2.5 text-white text-sm placeholder:text-gray-600 outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-colors"
+              className="w-full rounded-lg bg-surface border border-border px-4 py-2.5 text-ink text-sm placeholder:text-muted outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/30 transition-colors"
             />
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-accent text-dark font-medium text-sm rounded-lg px-4 py-2.5 hover:brightness-110 active:brightness-95 transition-all disabled:opacity-50 cursor-pointer disabled:cursor-wait"
+            className="w-full bg-accent text-accent-ink font-medium text-sm rounded-lg px-4 py-2.5 hover:brightness-110 active:brightness-95 transition-all disabled:opacity-50 cursor-pointer disabled:cursor-wait"
           >
             {loading ? 'Daxil olunur...' : 'Daxil ol'}
           </button>

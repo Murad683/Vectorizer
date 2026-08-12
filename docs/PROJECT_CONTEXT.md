@@ -600,6 +600,8 @@ mode (validated by `_require_secrets_in_prod`).
   20px), and the empty state (border-colored, 48px, subtle).
 - **No dark mode:** The tool is used in daytime work settings. A single
   light theme keeps things simple and consistent.
+  **Superseded by Phase 11** — dark mode was added as the default
+  theme; see that section for the current token/typography system.
 
 ### Frontend structure
 
@@ -1185,3 +1187,253 @@ understated selected-state, whether it reads as a natural evolution of
 Phase 8's minimalist design rather than a bolted-on admin sidebar — is
 a visual judgment call a human needs to make. I can't declare that on
 my own authority.
+
+## Phase 11: Design refresh — dark mode, typography, depth (`frontend/src/`)
+
+### What it does
+
+A pure visual/theming pass over the Phase 10 structure — no layout,
+routing, or functional changes. Adds true dark/light theming (dark
+default), a display serif typeface for hero moments, a single
+consistently-scoped accent role, and depth via background layering and
+soft shadows instead of the previously flat, single-light-theme,
+Inter-everywhere look. Explicit reference point: Claude's and
+ChatGPT's own interfaces, for *feel* (warmth, restraint, typographic
+contrast, accent discipline) — not layout, iconography, or brand
+assets, none of which were copied.
+
+### Theme tokens (`frontend/src/index.css`)
+
+Raw palette values live on plain CSS custom properties, swapped by a
+`[data-theme]` attribute on `<html>` — not Tailwind's built-in `dark:`
+variant, and not a bare `prefers-color-scheme` media query, since
+neither can express "stored choice overrides system preference."
+`@theme inline` (Tailwind v4) registers each token as a live
+`var()` reference rather than resolving it to a static value at build
+time, so `bg-canvas`, `text-ink`, etc. correctly repaint when the
+attribute changes at runtime with no rebuild.
+
+**Light** (`:root`, and `:root[data-theme="light"]`):
+
+| token | value | role |
+|---|---|---|
+| `canvas` / `panel` | `#FFFFFF` | app background / elevated surfaces |
+| `sidebar` | `#FAFAFA` | sidebar background (subtly distinct from canvas — the depth cue) |
+| `surface` / `surface-hover` | `#F5F5F5` / `#ECECEC` | hover fills, chip backgrounds |
+| `border` / `border-strong` | `#EAEAEA` / `#D9D9D9` | hairlines / emphasized borders |
+| `ink` / `ink-secondary` | `#151515` / `#3A3A3A` | primary / secondary text |
+| `muted` | `#6B6B6B` | tertiary text (bumped from Phase 8's `#888` — that was ~3.5:1 on white, failing WCAG AA; `#6B6B6B` is 5.33:1) |
+
+**Dark** (`:root[data-theme="dark"]`) — warm dark grays anchored on the
+brand's `#151515`, not pure black and not a neutral-gray inversion;
+`panel`/`surface` carry a faint warm (slightly brown/olive) undertone
+rather than blue-gray, and `ink` is a warm off-white (`#F3F0E9`), not
+`#FFFFFF` — avoids the harsh white-on-black look a naive "invert
+everything" dark mode produces:
+
+| token | value |
+|---|---|
+| `canvas` | `#151515` (the brand dark, used directly — the "natural anchor point" the brief asked for) |
+| `panel` | `#1C1B19` |
+| `sidebar` | `#111110` (darker than canvas — sidebar reads as sitting behind the main panel) |
+| `surface` / `surface-hover` | `#211F1D` / `#2A2825` |
+| `border` / `border-strong` | `#2C2A27` / `#3D3A36` |
+| `ink` / `ink-secondary` | `#F3F0E9` / `#B9B6AC` |
+| `muted` | `#858177` (4.70:1 on canvas — passes AA) |
+
+`success`/`error`/`processing` status colors are also theme-pairs
+(saturated for light, slightly softened for dark — `#4ADE80`/`#F87171`/
+`#60A5FA` — to avoid a neon-on-dark look). All contrast pairs checked
+against WCAG AA (4.5:1); every text/background combination in both
+themes clears it (dark-mode muted-on-canvas is the tightest at 4.70:1).
+
+**Accent is theme-invariant**: `#FEE500` with `#151515` text-on-accent
+(`accent-ink`), unchanged across both themes — one consistent brand
+color rather than one that shifts with the theme.
+
+### Accent usage rule — one recurring role, not one-off placements
+
+Per the brief's explicit ask ("spend the accent consistently in ONE
+clear recurring role"), accent yellow is used for exactly:
+
+1. **Primary action buttons** — login submit, "Yarat" (create user).
+   Solid `bg-accent` fill with `accent-ink` text. Secondary actions
+   (download buttons, "Yeni yükləmə", cancel/dismiss) stay bordered/
+   neutral, never accent-filled — this is what keeps the accent
+   meaningful instead of diluted.
+2. **The sidebar's selected-item indicator** — a 3px rounded left bar
+   (`Sidebar.tsx`), the one concrete idea named in the brief. Paired
+   with a quiet `bg-surface` tint on the row itself; the bar is what
+   actually reads as "selected," the tint is secondary reinforcement.
+3. **The brand mark** — the `vectorize-shape` logo animation (unchanged
+   from Phase 8) and the admin-role badge in user management (a small
+   accent-tinted pill — a "status accent," per the brief's third
+   example).
+
+Explicitly NOT accent: job status colors (success/error/processing —
+those signal job state, a different axis of meaning than "primary/
+mine," and mixing them would blur both), general icon hover colors,
+focus rings beyond the existing subtle `accent/30` ring already present
+since Phase 8.
+
+### Typography — Fraunces for hero moments, Inter for everything else
+
+**Fraunces** (Google Fonts, variable, optical-size axis `9..144`,
+weights 400/500/600) is the display/heading typeface, used only at
+true hero moments:
+- The home-state greeting (`HomeGreeting.tsx`, new) — "Bugün nəyi
+  vektorlaşdıraq?" ("What shall we vectorize today?" — adapted from
+  ChatGPT's "What can I help with?" to this product's actual function,
+  not a generic AI-assistant phrase grafted onto a file-conversion
+  tool), at `text-3xl`/`text-4xl`.
+- The login screen's "Vectorizer" wordmark, `text-4xl`.
+
+Everywhere else — sidebar entries, job filenames, buttons, labels,
+the persistent header wordmark, form fields, status badges — stays
+Inter, unchanged from Phase 8. This is a deliberate two-tier hierarchy
+(display serif for emotional/brand moments, clean sans for working UI),
+not a wholesale font swap; using Fraunces for e.g. the header logo or a
+job's filename would have been noise, not hierarchy.
+
+**Glyph coverage was verified before committing to this choice**:
+Azerbaijani's schwa characters (ə U+0259, Ə U+018F) fall inside Latin
+Extended-B, and Fraunces's served `latin-ext` `@font-face` block
+(`unicode-range: U+0100-02BA, ...`) covers that range — confirmed by
+directly inspecting the served CSS from `fonts.googleapis.com`, not
+just trusting a language-support list. A font that silently fell back
+to the browser default for `ə`/`Ə` in an Azerbaijani-language product
+would have been a real, easy-to-miss quality bug.
+
+### Home-state greeting (`components/HomeGreeting.tsx`, new)
+
+Sits above `UploadZone` in `DashboardPage`'s home state (no job
+selected) — previously the upload dropzone sat alone on empty space.
+Fraunces headline + a short Inter subtitle explaining what the tool
+does, replacing dead space with a genuine "hero" moment per the brief.
+
+### Theme detection & persistence (`context/ThemeContext.tsx`, new)
+
+- **Resolution order**: `localStorage['vectorizer-theme']` if present
+  (`'dark'` or `'light'`) → else `window.matchMedia('(prefers-color-
+  scheme: light)').matches` → light if explicitly preferred → **dark**
+  otherwise (covers both "prefers dark" and "no preference expressed,"
+  satisfying "dark mode as the default" while still respecting an
+  explicit light-preferring system, per the brief's two — slightly
+  overlapping — requirements).
+- **No flash of wrong theme**: the exact same resolution logic runs
+  synchronously in an inline `<script>` in `index.html`'s `<head>`,
+  setting `data-theme` on `<html>` before first paint (i.e. before
+  React mounts or any CSS-driven color is committed to the screen).
+  `ThemeProvider`'s `getInitialTheme()` re-derives the identical value
+  on mount so React state and the DOM attribute start in sync.
+- **Live system-preference following**: only while no explicit choice
+  is stored — a `matchMedia('(prefers-color-scheme: light)')` change
+  listener updates the theme live, but only runs its effect when
+  `localStorage` has no stored value; once the user toggles, that
+  choice is sticky and the listener is skipped entirely.
+- **Toggle** (`components/ThemeToggle.tsx`, new): a sun/moon icon
+  button, present directly in the header on every screen (dashboard,
+  users) and fixed top-right on the login screen — not buried in a
+  dropdown, matching how the brief's reference apps expose it as an
+  always-visible control rather than a settings-menu item.
+
+### Depth system
+
+- **Elevation via background layering, not heavy shadows**: sidebar
+  (`bg-sidebar`) vs. main panel (`bg-canvas`) are different shades in
+  both themes — that contrast alone reads as depth without needing a
+  shadow on the boundary. Dropdown menus and the create-user form panel
+  additionally sit on `bg-panel` (lighter than canvas in dark mode) with
+  a `shadow-md`/`shadow-sm` pair (soft, low-opacity — barely visible in
+  light mode, a real but restrained lift in dark mode where elevation
+  needs more contrast to read).
+- **Rounded-corner scale**, applied consistently rather than ad hoc:
+  `rounded-lg` (buttons, inputs, small chips), `rounded-xl` (panels,
+  dropdown menus, the upload dropzone), `rounded-full` (avatars, status
+  badges, the sidebar accent bar). This was already roughly Phase 8's
+  pattern; Phase 11 just applies it uniformly to every new/re-themed
+  element instead of per-component ad hoc choices.
+- **Avatar circles** (header, both Dashboard and Users pages): kept
+  the existing initials-in-circle from Phase 8/10, refined with
+  `border-strong` (vs. the previous plain `border`) for a touch more
+  definition against the now-varied background tones.
+
+### Sidebar polish
+
+Beyond the accent selection bar: entry padding increased (`py-3` →
+`py-3.5`) for more comfortable spacing per the brief; hover state now
+uses a dedicated `surface-hover` token (previously reused `surface` for
+both the selected AND hover states, which made them hard to
+distinguish); the delete-confirm overlay uses `bg-sidebar/95` instead
+of a hardcoded `bg-white/95` so it's correct in dark mode too (this was
+the one spot in Phase 10's code with a literal color instead of a
+token — everything else was already token-based, which is exactly why
+this phase could be a pure CSS-variable swap rather than a rewrite of
+component logic).
+
+### Validated
+
+- **Dark mode confirmed as the true default**: fresh browser session
+  (no stored preference), `document.documentElement.getAttribute
+  ('data-theme')` → `"dark"`, computed `body` background `rgb(21, 21,
+  21)` (`#151515`) — verified via direct DOM/computed-style inspection,
+  not just visual inspection.
+- **Fraunces genuinely loaded and applied**, not silently falling back:
+  `document.fonts` shows 9 loaded Fraunces faces; the home-greeting and
+  login-wordmark `<h1>`s both compute `font-family: Fraunces, Georgia,
+  serif` with the Fraunces face actually rendering (confirmed via
+  `document.fonts`, and visually via Azerbaijani schwa characters
+  rendering correctly in the greeting text, not as tofu/fallback
+  glyphs).
+- **Toggle + persistence**: toggled light → dark → light across the
+  login screen, dashboard, and users page; each toggle immediately
+  updated `data-theme`, computed colors, and `localStorage
+  ['vectorizer-theme']`; reloaded the page after setting light mode —
+  `data-theme` was still `"light"` on the very first paint (the inline
+  pre-paint script), no flash of dark-then-light.
+- **Accent role verified programmatically**: the sidebar's selected-
+  item bar computed to `3px` wide, `rgb(254, 229, 0)` (`#FEE500`)
+  exactly, `border-radius` fully rounded — confirmed via
+  `getComputedStyle`, not just visual read.
+- **Contrast checked numerically** (WCAG relative-luminance formula,
+  computed in-browser against the actual rendered RGB values): muted
+  text on canvas 4.70:1 (dark) / 5.33:1 (light), secondary text 9.00:1
+  (dark) / 11.37:1 (light), accent-ink on accent 14.28:1 — every pair
+  clears the 4.5:1 AA threshold for normal text.
+- **Full Phase 10 functional regression re-run against the new theme**:
+  created a user (dark mode, via the now-accent-filled "Yarat" button),
+  deactivated them and confirmed login blocked (401
+  `invalid_credentials` via direct API check), deleted them (zero-job
+  case, inline confirm), selected a sidebar job (accent bar appeared,
+  panel swapped to `JobDetail`), toggled themes mid-session with the
+  job still selected (selection survived the toggle), deleted that job
+  from the sidebar's own delete-with-confirm (job removed, panel
+  returned to the home/greeting state) — every Phase 10 interaction
+  works identically under the new theme system.
+- Zero console errors throughout every step above.
+- TypeScript (`tsc -b`) and production build (`vite build`) both clean.
+- Backend test suite: 127 tests, 0 failures — confirmed unaffected, as
+  expected for a frontend-only phase (`git status` shows zero backend
+  files touched).
+
+### Deviations from the spec
+
+None identified — dark-as-default with a persisted toggle, system-
+preference-respecting initial detection, the single accent role, a
+real display typeface with verified Azerbaijani glyph coverage, the
+home greeting, and depth via layering/shadows were all implemented as
+specified, without touching Phase 10's structural layout or any
+backend code.
+
+### Visual quality caveat
+
+Every theme-switching, contrast, and functional-regression claim above
+was verified programmatically or through direct browser interaction —
+not just eyeballed. Whether the result actually *reads* as closer to
+the Claude/ChatGPT reference — whether the warmth, restraint, and
+typographic contrast land the way the brief intends, versus merely
+being "correct but still not quite premium" — is a subjective design
+judgment a human needs to make by actually looking at it. I've explained
+the reasoning behind each choice above so that judgment has something
+concrete to evaluate against, but I'm not declaring the visual result
+"done" on my own authority.

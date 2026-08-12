@@ -27,15 +27,15 @@ export default function JobDetail({ job, onDeleted }: Props) {
     <div>
       <div className="flex items-start justify-between gap-4 mb-6">
         <div className="min-w-0">
-          <h1 className="text-lg font-semibold text-dark truncate">{job.input_filename}</h1>
+          <h1 className="text-lg font-semibold text-ink truncate">{job.input_filename}</h1>
           <p className="text-xs text-muted mt-1">{formatDate(job.created_at)}</p>
         </div>
         <StatusBadge status={job.status} />
       </div>
 
       {(job.status === 'pending' || job.status === 'processing') && (
-        <div className="flex items-center gap-3 text-sm text-dark-secondary bg-surface rounded-lg px-4 py-3 mb-6">
-          <div className="w-4 h-4 border-2 border-dark/20 border-t-dark rounded-full animate-spin shrink-0" />
+        <div className="flex items-center gap-3 text-sm text-ink-secondary bg-surface border border-border rounded-lg px-4 py-3 mb-6">
+          <div className="w-4 h-4 border-2 border-ink/20 border-t-ink rounded-full animate-spin shrink-0" />
           Fayl hazırlanır, bir az gözləyin...
         </div>
       )}
@@ -46,7 +46,7 @@ export default function JobDetail({ job, onDeleted }: Props) {
             <button
               key={fmt}
               onClick={() => downloadJobFile(job.job_id, fmt, job.input_filename)}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-dark-secondary border border-border rounded-lg px-4 py-2 hover:bg-surface transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-ink-secondary border border-border rounded-lg px-4 py-2 hover:bg-surface-hover hover:border-border-strong transition-colors cursor-pointer"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
@@ -58,7 +58,7 @@ export default function JobDetail({ job, onDeleted }: Props) {
       )}
 
       {job.status === 'failed' && job.error_message && (
-        <div className="text-sm text-error/90 bg-error/5 rounded-lg px-4 py-3 mb-6">
+        <div className="text-sm text-error/90 bg-error/5 border border-error/20 rounded-lg px-4 py-3 mb-6">
           <span className="font-medium">Xəta: </span>
           {job.error_message.length > 200
             ? 'Emal zamanı texniki xəta baş verdi. Yenidən cəhd edin.'
@@ -79,7 +79,7 @@ export default function JobDetail({ job, onDeleted }: Props) {
           </button>
         ) : (
           <div className="flex items-center gap-3 text-sm">
-            <span className="text-dark-secondary">Silinsin? Bu geri qaytarıla bilməz.</span>
+            <span className="text-ink-secondary">Silinsin? Bu geri qaytarıla bilməz.</span>
             <button
               onClick={handleDelete}
               disabled={deleting}

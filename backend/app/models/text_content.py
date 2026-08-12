@@ -55,6 +55,15 @@ class LabeledList(BaseModel):
 class TextContent(BaseModel):
     """One or more independent labeled lists extracted from an image."""
 
+    heading: str | None = Field(
+        default=None,
+        description=(
+            "The instruction/heading line above the lists, preserved exactly "
+            "as written (including a leading question number if present in "
+            "the image), e.g. '87. Uyğunluğu müəyyən edin.'. None if the "
+            "image has no such line — never invent text that isn't there."
+        ),
+    )
     lists: list[LabeledList]
 
     def usable_columns(self) -> tuple[LabeledList, LabeledList] | None:

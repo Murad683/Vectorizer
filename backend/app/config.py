@@ -29,13 +29,52 @@ class Settings(BaseSettings):
     max_pages_per_file: int = 50
     frontend_origin: str = "http://localhost:5173"
 
+    jwt_secret: str = ""
+    admin_email: str = ""
+    admin_password: str = ""
+
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_user: str = ""
+    postgres_password: str = ""
+    postgres_db: str = ""
+
+    @property
+    def database_url(self) -> str:
+        """Plain ``postgresql://`` conninfo string for psycopg connections.
+
+        Alembic's ``env.py`` rewrites this to the ``postgresql+psycopg://``
+        SQLAlchemy dialect form itself — this property stays in the plain
+        form so it can be passed directly to ``psycopg.connect()``.
+        """
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
     @model_validator(mode="after")
     def _require_secrets_in_prod(self) -> "Settings":
         """Fail fast when required secrets are missing in prod mode."""
-        if self.environment == "prod" and not self.gemini_api_key:
+        missing: list[str] = []
+        if self.environment == "prod":
+            if not self.gemini_api_key:
+                missing.append("GEMINI_API_KEY")
+            if not self.jwt_secret:
+                missing.append("JWT_SECRET")
+            if not self.admin_email:
+                missing.append("ADMIN_EMAIL")
+            if not self.admin_password:
+                missing.append("ADMIN_PASSWORD")
+            if not self.postgres_user:
+                missing.append("POSTGRES_USER")
+            if not self.postgres_password:
+                missing.append("POSTGRES_PASSWORD")
+            if not self.postgres_db:
+                missing.append("POSTGRES_DB")
+        if missing:
             raise ValueError(
-                "GEMINI_API_KEY must be set when ENVIRONMENT=prod. "
-                "Add it to the environment or the backend/.env file."
+                f"{', '.join(missing)} must be set when ENVIRONMENT=prod. "
+                "Add them to the environment or the backend/.env file."
             )
         return self
 

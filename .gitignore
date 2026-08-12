@@ -18,6 +18,9 @@ node_modules/
 dist/
 dist-ssr/
 
+# Runtime data (job uploads, outputs, SQLite DB)
+backend/data/
+
 # IDE / OS
 .idea/
 .vscode/

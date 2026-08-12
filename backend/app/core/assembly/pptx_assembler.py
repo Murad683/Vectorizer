@@ -20,6 +20,7 @@ from io import BytesIO
 from math import ceil
 
 from pptx import Presentation
+from pptx.oxml.ns import qn
 from pptx.presentation import Presentation as PresentationType
 from pptx.slide import Slide
 from pptx.text.text import _Paragraph
@@ -215,16 +216,81 @@ def _add_vision_element(
     cursor.slide = None
 
 
+_NO_STYLE_NO_GRID_GUID = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"
+
+
+def _remove_pptx_table_borders(table) -> None:  # noqa: ANN001
+    """Set each cell's four border lines to noFill so no grid prints.
+
+    Scoped to TEXT_CONTENT tables — a matching question has no visible
+    grid in the source scan (students draw connecting lines by hand),
+    unlike the real data tables which keep their normal borders.
+    """
+    for row in table.rows:
+        for cell in row.cells:
+            tc_pr = cell._tc.get_or_add_tcPr()
+            # Insert in reverse so the final order matches the CT_TableCell
+            # Properties schema (lnL, lnR, lnT, lnB, …).
+            for tag in ("a:lnB", "a:lnT", "a:lnR", "a:lnL"):
+                for existing in tc_pr.findall(qn(tag)):
+                    tc_pr.remove(existing)
+                ln = tc_pr.makeelement(qn(tag), {"w": "0"})
+                ln.append(ln.makeelement(qn("a:noFill"), {}))
+                tc_pr.insert(0, ln)
+
+
+def _remove_pptx_table_style(table) -> None:  # noqa: ANN001
+    """Strip the colored header/row-banding style layer, not just borders.
+
+    Border lines (``a:lnL``/``a:lnR``/``a:lnT``/``a:lnB`` on each cell)
+    are a separate OOXML mechanism from table styling: the coloured
+    header row and alternating row bands come from ``a:tableStyleId``
+    plus the ``firstRow``/``bandRow`` flags on ``a:tblPr``, which is what
+    actually painted q87's table like the real data tables even after
+    border lines were zeroed. Point the style at PowerPoint's built-in
+    "No Style, No Grid" preset and disable both flags so neither the
+    header colour nor the banding activates.
+    """
+    tbl_pr = table._tbl.find(qn("a:tblPr"))
+    tbl_pr.set("firstRow", "0")
+    tbl_pr.set("bandRow", "0")
+    style_id = tbl_pr.find(qn("a:tableStyleId"))
+    style_id.text = _NO_STYLE_NO_GRID_GUID
+
+
+def _add_heading(cursor: _SlideCursor, heading: str) -> None:
+    """Append a plain heading text box directly above a text-content table."""
+    height_in = _LINE_H_IN + 0.06
+    slide = cursor.fit(height_in)
+    box = slide.shapes.add_textbox(
+        Inches(_MARGIN_IN),
+        Inches(cursor.y_in),
+        Inches(_CONTENT_W_IN),
+        Inches(height_in),
+    )
+    frame = box.text_frame
+    frame.word_wrap = True
+    run = frame.paragraphs[0].add_run()
+    run.text = heading
+    run.font.size = _FONT_SIZE
+    cursor.advance(height_in)
+
+
 def _add_text_content(cursor: _SlideCursor, text_content: TextContent) -> bool:
-    """Render a two-list matching question as a native 2-column table.
+    """Render a two-list matching question as a plain, unstyled table.
 
     Flows inline (not on its own slide): it is textual content, so it
-    stacks with surrounding text. Returns False when the content is not a
-    usable two-list structure, so the caller can fall back to the image.
+    stacks with surrounding text. A heading text box (if present) is
+    added directly above the table. No border lines and no table-style
+    header/banding (two separate OOXML mechanisms, both cleared). Returns
+    False when the content is not a usable two-list structure, so the
+    caller can fall back to the image.
     """
     columns = text_content.usable_columns()
     if columns is None:
         return False
+    if text_content.heading:
+        _add_heading(cursor, text_content.heading)
     left, right = columns
     n_rows = max(len(left.lines), len(right.lines))
     height_in = n_rows * _ROW_H_IN
@@ -238,6 +304,8 @@ def _add_text_content(cursor: _SlideCursor, text_content: TextContent) -> bool:
         Inches(height_in),
     )
     table = shape.table
+    _remove_pptx_table_borders(table)
+    _remove_pptx_table_style(table)
     for col_idx, column in enumerate((left, right)):
         for row_idx, line in enumerate(column.lines):
             paragraph = table.cell(row_idx, col_idx).text_frame.paragraphs[0]

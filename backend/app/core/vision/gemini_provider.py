@@ -47,7 +47,11 @@ If content_type is "diagram", fill "diagram" with {nodes, edges}:
 - A flowchart always has arrows, so "edges" must not be empty.
 Leave "text_content" null in this case.
 
-If content_type is "text_content", fill "text_content" with {lists}:
+If content_type is "text_content", fill "text_content" with {heading, lists}:
+- "heading" is the instruction line above the two lists, if the image has \
+one (e.g. "87. Uyğunluğu müəyyən edin."). Preserve it EXACTLY, including \
+the leading question number if present. Leave it null if the image has no \
+such line — never invent heading text that isn't actually in the image.
 - "lists" is an array of independent labeled lists in left-to-right order \
 (e.g. the numbered list first, then the lettered list).
 - Each list has "lines"; each line has "runs"; each run has "text" and \

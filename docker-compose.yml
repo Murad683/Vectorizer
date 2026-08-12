@@ -1,19 +1,78 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    ports:
+      # Host-side port is 5434 (not 5432) to avoid colliding with a
+      # locally installed Postgres that may already own 5432 on the host.
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Ephemeral database for the test suite (docker-compose --profile test
+  # up -d postgres-test). Not used by the backend/frontend services.
+  # Credentials are throwaway test fixtures, not real secrets, so they're
+  # inlined here rather than sourced from backend/.env.
+  postgres-test:
+    image: postgres:16-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: vectorizer_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d vectorizer_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build: ./backend
     ports:
       - "8000:8000"
     env_file:
       - ./backend/.env
+    environment:
+      # Overrides backend/.env's host-side values — inside the compose
+      # network the database is reachable by service name on its normal
+      # port (the 5434 host mapping is irrelevant to container-to-container
+      # traffic).
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
     volumes:
       - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
   frontend:
     build: ./frontend
     ports:
       - "5173:5173"
+    environment:
+      # Overrides vite.config.ts's localhost:8000 default — inside the
+      # compose network the backend is reachable by service name, not
+      # "localhost" (which inside this container means itself).
+      VITE_API_PROXY_TARGET: http://backend:8000
     volumes:
       - ./frontend:/app
       - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_started
     command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  postgres_data:

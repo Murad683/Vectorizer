@@ -1,13 +1,64 @@
 """Shared fixtures for the backend test suite."""
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import psycopg
 import pymupdf
 import pytest
 
+from app.core.auth.store import UserStore
+from app.core.queue.store import JobStore
 from app.models.diagram import DiagramEdge, DiagramGraph, DiagramNode, ShapeType
 
 SAMPLES_DIR = Path(__file__).resolve().parents[2] / "samples"
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+# Points at the ephemeral test database: `docker compose --profile test up
+# -d postgres-test` locally (see docker-compose.yml), or the `postgres`
+# service block in .github/workflows/ci.yml. Not the dev/prod database —
+# tests never touch that one.
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql://test:test@localhost:5433/vectorizer_test",
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _migrated_test_database() -> None:
+    """Apply Alembic migrations to the test database once per session."""
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=BACKEND_DIR,
+        env={**os.environ, "DATABASE_URL": TEST_DATABASE_URL},
+        check=True,
+    )
+
+
+def _truncate_all() -> None:
+    """Wipe both tables for per-test isolation (cheap vs. a fresh DB)."""
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        conn.execute("TRUNCATE TABLE jobs, users RESTART IDENTITY CASCADE")
+
+
+@pytest.fixture()
+def job_store() -> JobStore:
+    """A fresh JobStore against the truncated test database."""
+    _truncate_all()
+    store = JobStore(dsn=TEST_DATABASE_URL)
+    yield store
+    store.close()
+
+
+@pytest.fixture()
+def user_store() -> UserStore:
+    """A fresh UserStore against the truncated test database."""
+    _truncate_all()
+    store = UserStore(dsn=TEST_DATABASE_URL)
+    yield store
+    store.close()
 
 
 @pytest.fixture(scope="session")

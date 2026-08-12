@@ -137,21 +137,47 @@ def _add_vision_element(
     document.add_picture(BytesIO(image), width=Inches(4.5))
 
 
-def _add_text_content(document: Document, text_content: TextContent) -> bool:
-    """Render a two-list matching question as a native 2-column table.
+def _remove_table_borders(table) -> None:  # noqa: ANN001
+    """Set all tblBorders edges to "nil" so no border/gridline prints.
 
-    Left column = first list, right column = second list, one row per
-    line with the shorter column padded by empty cells. Returns False
-    (rendering nothing) when the content is not a usable two-list
+    Scoped to TEXT_CONTENT tables — a matching question has no visible
+    grid in the source scan (students draw connecting lines by hand),
+    unlike the real data tables which keep their normal borders.
+    """
+    tbl_pr = table._tbl.tblPr
+    borders = tbl_pr.makeelement(f"{{{_NS_W}}}tblBorders", {})
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = borders.makeelement(f"{{{_NS_W}}}{edge}", {f"{{{_NS_W}}}val": "nil"})
+        borders.append(el)
+    # CT_TblPr requires schema order …tblW, jc, tblCellSpacing, tblInd,
+    # tblBorders, shd, tblLayout, tblCellMar, tblLook…; insert before the
+    # first element that must follow tblBorders (tblLook, in practice).
+    successor = tbl_pr.find(f"{{{_NS_W}}}tblLook")
+    if successor is not None:
+        successor.addprevious(borders)
+    else:
+        tbl_pr.append(borders)
+
+
+def _add_text_content(document: Document, text_content: TextContent) -> bool:
+    """Render a two-list matching question as a native, borderless table.
+
+    A heading paragraph (if present) is emitted directly above the
+    table. Left column = first list, right column = second list, one
+    row per line with the shorter column padded by empty cells. Returns
+    False (rendering nothing) when the content is not a usable two-list
     structure, so the caller can fall back to the original image.
     """
     columns = text_content.usable_columns()
     if columns is None:
         return False
+    if text_content.heading:
+        document.add_paragraph().add_run(text_content.heading)
     left, right = columns
     n_rows = max(len(left.lines), len(right.lines))
     table = document.add_table(rows=n_rows, cols=2)
     table.style = "Table Grid"
+    _remove_table_borders(table)
     for col_idx, column in enumerate((left, right)):
         for row_idx, line in enumerate(column.lines):
             cell = table.cell(row_idx, col_idx)

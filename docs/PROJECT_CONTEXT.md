@@ -236,5 +236,49 @@ per-shape anchors. Canvas extent = graph bounds + the back-edge rail.
   paragraph as one unit. `"page"` pins both axes to the page (text would
   reflow underneath; not the document default).
 
-Full document assembly (mixing text/tables/diagrams into one output) is
-still pending — next phase.
+## Phase 5: full document assembly (`app/core/assembly/`)
+
+`assemble_docx()` / `assemble_pptx()` consume the ordered
+`list[ClassifiedElement]` and produce one complete Document /
+Presentation, elements in SOURCE ORDER. Diagrams run the existing
+vision → layout → shapes chain (renderers untouched). A
+`vision_provider` can be injected (tests mock it; default lazily
+creates the Gemini provider).
+
+- **PPTX slide strategy — "flow-fill, diagrams on their own slide"**:
+  the source is a textbook page, not a deck, and DOCX inputs carry no
+  page geometry (`source_page` always 1), so estimated element heights
+  drive pagination: text/tables stack top-to-bottom on the current
+  10×7.5 in slide and a new slide starts when the next element won't
+  fit; each DIAGRAM gets a dedicated slide at its position in the
+  sequence (flowcharts are large; sharing with body text would shrink
+  them illegibly). Content after a diagram starts on a fresh slide.
+- **Tables**: rebuilt as native tables (python-docx "Table Grid" /
+  pptx `add_table`) from the flattened tab/newline text +
+  `n_rows`/`n_cols` metadata.
+- **Subscripts**: the extractor now captures run-level
+  `metadata["runs"]` (text + `vert_align`) for paragraphs containing
+  subscript/superscript runs (e.g. q81's `41x + 36x = 77x`); both
+  assemblers re-emit them (`font.subscript` in docx, `baseline` rPr
+  attr in pptx). Note: the sample's real tables contain NO subscripts —
+  the "subscripted table" (q87) exists only as a scanned image.
+- **Vision fallback**: if vision errors OR returns a graph with no
+  edges (a scanned table/list misclassified as DIAGRAM by the
+  image→DIAGRAM rule — q87 triggers this), the assemblers embed the
+  ORIGINAL image instead of rendering disconnected boxes. A proper
+  photo-vs-diagram classifier rule is still future work.
+- **DOCX wrapping**: the assembler post-processes each inserted diagram
+  anchor from `wp:wrapNone` to `wp:wrapTopAndBottom` so following
+  paragraphs flow below the canvas (docx_shapes itself is unchanged).
+- **Styling fidelity is explicitly limited**: original fonts, sizes,
+  colors, and paragraph styling are NOT reproduced — output uses
+  reasonable defaults (12 pt, default theme). Only text content, order,
+  table structure, and sub/superscripts are preserved.
+- **PPTX shape fill fix**: node shapes now set an explicit white
+  `solidFill`, black 1.5 pt outline, black text, and no inherited
+  shadow — previously they inherited the theme `fillRef idx="3"`
+  (a GRADIENT style → the banding seen on process boxes).
+
+`scripts/assemble_document.py` runs the whole chain on the real sample
+and package-validates both outputs. Remaining later work: queue system,
+frontend, batch processing.

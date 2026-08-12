@@ -8,6 +8,7 @@ This is the client deliverable for diagrams — not an image.
 
 import logging
 
+from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.oxml.ns import qn
@@ -84,6 +85,14 @@ def add_diagram_to_slide(
             _px_to_emu(node.width, scale),
             _px_to_emu(node.height, scale),
         )
+        # Explicit flat fill/line/text colors: without these the shape
+        # inherits the theme's p:style fillRef idx="3" — a GRADIENT fill
+        # in the default Office theme, which renders as banding.
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        shape.line.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        shape.line.width = Pt(1.5)
+        shape.shadow.inherit = False
         text_frame = shape.text_frame
         text_frame.word_wrap = True
         text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
@@ -92,6 +101,7 @@ def add_diagram_to_slide(
         run = paragraph.add_run()
         run.text = node.text  # real editable text, Azerbaijani preserved
         run.font.size = _font_size_for(node, scale)
+        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
         shapes_by_id[node.id] = shape
 
     for edge in graph.edges:

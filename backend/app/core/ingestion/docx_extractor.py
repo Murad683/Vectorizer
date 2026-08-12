@@ -41,17 +41,19 @@ class DocxExtractor(Extractor):
                 paragraph = Paragraph(child, document)
                 elements.extend(self._paragraph_images(paragraph, document))
                 if paragraph.text.strip():
+                    metadata: dict[str, object] = {
+                        "is_table": False,
+                        "style": (paragraph.style.name if paragraph.style else None),
+                    }
+                    runs = self._formatted_runs(paragraph)
+                    if runs is not None:
+                        metadata["runs"] = runs
                     elements.append(
                         ExtractedElement(
                             source_page=1,
                             element_kind=ElementKind.TEXT_BLOCK,
                             raw_content=paragraph.text.strip(),
-                            metadata={
-                                "is_table": False,
-                                "style": (
-                                    paragraph.style.name if paragraph.style else None
-                                ),
-                            },
+                            metadata=metadata,
                         )
                     )
             elif child.tag == f"{{{_NS['w']}}}tbl":
@@ -59,6 +61,28 @@ class DocxExtractor(Extractor):
                 elements.append(self._table_element(table))
         logger.info("Extracted %d elements from DOCX %s", len(elements), file_path.name)
         return elements
+
+    @staticmethod
+    def _formatted_runs(paragraph: Paragraph) -> list[dict[str, str | None]] | None:
+        """Run-level text with vertical alignment, when the paragraph
+        contains subscript/superscript runs; None for plain paragraphs.
+
+        Only captured when needed so downstream stages can keep treating
+        ordinary paragraphs as flat text.
+        """
+        vert_aligns: list[str | None] = []
+        for run in paragraph.runs:
+            vert_align = run._r.find(f".//{{{_NS['w']}}}vertAlign")
+            vert_aligns.append(
+                vert_align.get(f"{{{_NS['w']}}}val") if vert_align is not None else None
+            )
+        if not any(vert_aligns):
+            return None
+        return [
+            {"text": run.text, "vert_align": va}
+            for run, va in zip(paragraph.runs, vert_aligns, strict=True)
+            if run.text
+        ]
 
     @staticmethod
     def _paragraph_images(

@@ -22,6 +22,7 @@ from math import ceil
 from pptx import Presentation
 from pptx.presentation import Presentation as PresentationType
 from pptx.slide import Slide
+from pptx.text.text import _Paragraph
 from pptx.util import Inches, Pt
 
 from app.core.layout import layout_graph
@@ -29,6 +30,7 @@ from app.core.render.pptx_shapes import add_diagram_to_slide
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
+from app.models.text_content import TextContent
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +90,29 @@ def assemble_pptx(
         elif item.element_type == ElementType.DIAGRAM:
             if provider is None:
                 provider = get_vision_provider()
-            _add_diagram(cursor, item, provider, context=last_text)
+            _add_vision_element(cursor, item, provider, context=last_text)
     logger.info(
         "Assembled PPTX with %d elements on %d slides",
         len(classified),
         len(prs.slides._sldIdLst),
     )
     return prs
+
+
+def _emit_runs(paragraph: _Paragraph, runs: list[dict[str, str | None]]) -> None:
+    """Append run-dicts (``{text, vert_align}``) with subscript baselines.
+
+    Shared by plain text and text-content cells; PowerPoint expresses
+    sub/superscript as a ``baseline`` attribute on the run properties.
+    """
+    for run_data in runs:
+        run = paragraph.add_run()
+        run.text = run_data["text"] or ""
+        run.font.size = _FONT_SIZE
+        if run_data.get("vert_align") == "subscript":
+            run.font._rPr.set("baseline", "-25000")
+        elif run_data.get("vert_align") == "superscript":
+            run.font._rPr.set("baseline", "30000")
 
 
 def _add_text(cursor: _SlideCursor, item: ClassifiedElement) -> None:
@@ -114,14 +132,7 @@ def _add_text(cursor: _SlideCursor, item: ClassifiedElement) -> None:
     paragraph = frame.paragraphs[0]
     runs = item.element.metadata.get("runs")
     if runs:
-        for run_data in runs:
-            run = paragraph.add_run()
-            run.text = run_data["text"]
-            run.font.size = _FONT_SIZE
-            if run_data.get("vert_align") == "subscript":
-                run.font._rPr.set("baseline", "-25000")
-            elif run_data.get("vert_align") == "superscript":
-                run.font._rPr.set("baseline", "30000")
+        _emit_runs(paragraph, runs)
     else:
         run = paragraph.add_run()
         run.text = text
@@ -158,31 +169,30 @@ def _add_table(cursor: _SlideCursor, item: ClassifiedElement) -> None:
     cursor.advance(height_in + 0.1)
 
 
-def _add_diagram(
+def _add_vision_element(
     cursor: _SlideCursor,
     item: ClassifiedElement,
     provider: VisionProvider,
     context: str | None,
 ) -> None:
-    """Give the diagram its own slide; fall back to the image on failure."""
+    """Render a vision-analysed image: text content, diagram, or image.
+
+    TEXT_CONTENT flows inline as a native 2-column table; a DIAGRAM with
+    edges gets its own slide of native shapes; anything else falls back
+    to embedding the original image on its own slide.
+    """
     image = item.element.raw_content
     assert isinstance(image, bytes)
     result = provider.analyze_diagram(image, context=context)
-    slide = cursor.new_slide()
+
+    if result.text_content is not None and _add_text_content(
+        cursor, result.text_content
+    ):
+        return
+
     graph = result.diagram_graph
-    # A "diagram" with no edges is not a flowchart (e.g. a scanned table
-    # or list misclassified as DIAGRAM by the image rule) — embed the
-    # original image instead of rendering disconnected boxes.
-    if result.error or graph is None or not graph.edges:
-        logger.warning(
-            "No usable diagram for element %s (%s); embedding original image",
-            item.element.id,
-            result.error or "graph has no edges",
-        )
-        slide.shapes.add_picture(
-            BytesIO(image), Inches(2.5), Inches(0.5), height=Inches(6.0)
-        )
-    else:
+    slide = cursor.new_slide()
+    if graph is not None and graph.edges:
         layouted = layout_graph(graph)
         add_diagram_to_slide(
             layouted,
@@ -192,5 +202,45 @@ def _add_diagram(
             max_width_emu=Inches(9),
             max_height_emu=Inches(7),
         )
-    # Content after a diagram starts on a fresh slide.
+    else:
+        logger.warning(
+            "No usable diagram/text for element %s (%s); embedding original image",
+            item.element.id,
+            result.error or "degenerate content",
+        )
+        slide.shapes.add_picture(
+            BytesIO(image), Inches(2.5), Inches(0.5), height=Inches(6.0)
+        )
+    # Content after a diagram/image starts on a fresh slide.
     cursor.slide = None
+
+
+def _add_text_content(cursor: _SlideCursor, text_content: TextContent) -> bool:
+    """Render a two-list matching question as a native 2-column table.
+
+    Flows inline (not on its own slide): it is textual content, so it
+    stacks with surrounding text. Returns False when the content is not a
+    usable two-list structure, so the caller can fall back to the image.
+    """
+    columns = text_content.usable_columns()
+    if columns is None:
+        return False
+    left, right = columns
+    n_rows = max(len(left.lines), len(right.lines))
+    height_in = n_rows * _ROW_H_IN
+    slide = cursor.fit(height_in)
+    shape = slide.shapes.add_table(
+        n_rows,
+        2,
+        Inches(_MARGIN_IN),
+        Inches(cursor.y_in),
+        Inches(_CONTENT_W_IN),
+        Inches(height_in),
+    )
+    table = shape.table
+    for col_idx, column in enumerate((left, right)):
+        for row_idx, line in enumerate(column.lines):
+            paragraph = table.cell(row_idx, col_idx).text_frame.paragraphs[0]
+            _emit_runs(paragraph, line.to_run_dicts())
+    cursor.advance(height_in + 0.1)
+    return True

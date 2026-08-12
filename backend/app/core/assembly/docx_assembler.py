@@ -14,12 +14,14 @@ from io import BytesIO
 import docx
 from docx.document import Document
 from docx.shared import Emu, Inches
+from docx.text.paragraph import Paragraph
 
 from app.core.layout import layout_graph
 from app.core.render.docx_shapes import add_diagram_to_docx
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
+from app.models.text_content import TextContent
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +50,23 @@ def assemble_docx(
         elif item.element_type == ElementType.DIAGRAM:
             if provider is None:
                 provider = get_vision_provider()
-            _add_diagram(document, item, provider, context=last_text)
+            _add_vision_element(document, item, provider, context=last_text)
     logger.info("Assembled DOCX with %d elements", len(classified))
     return document
+
+
+def _emit_runs(paragraph: Paragraph, runs: list[dict[str, str | None]]) -> None:
+    """Append run-dicts (``{text, vert_align}``) with subscript formatting.
+
+    Shared by plain text and text-content cells so subscript handling
+    lives in one place.
+    """
+    for run_data in runs:
+        run = paragraph.add_run(run_data["text"])
+        if run_data.get("vert_align") == "subscript":
+            run.font.subscript = True
+        elif run_data.get("vert_align") == "superscript":
+            run.font.superscript = True
 
 
 def _add_text(document: Document, item: ClassifiedElement) -> None:
@@ -58,12 +74,7 @@ def _add_text(document: Document, item: ClassifiedElement) -> None:
     runs = item.element.metadata.get("runs")
     paragraph = document.add_paragraph()
     if runs:
-        for run_data in runs:
-            run = paragraph.add_run(run_data["text"])
-            if run_data.get("vert_align") == "subscript":
-                run.font.subscript = True
-            elif run_data.get("vert_align") == "superscript":
-                run.font.superscript = True
+        _emit_runs(paragraph, runs)
     else:
         paragraph.add_run(str(item.element.raw_content))
 
@@ -83,37 +94,70 @@ def _add_table(document: Document, item: ClassifiedElement) -> None:
             table.cell(row_idx, col_idx).text = text
 
 
-def _add_diagram(
+def _add_vision_element(
     document: Document,
     item: ClassifiedElement,
     provider: VisionProvider,
     context: str | None,
 ) -> None:
-    """Insert the diagram as native shapes, or the original image on failure."""
+    """Render a vision-analysed image: text content, diagram, or image.
+
+    The single vision call classifies the image; TEXT_CONTENT becomes a
+    native 2-column table, a DIAGRAM with edges becomes native shapes,
+    and anything else (error, edgeless graph, unusable list structure)
+    falls back to embedding the original image.
+    """
     image = item.element.raw_content
     assert isinstance(image, bytes)
     result = provider.analyze_diagram(image, context=context)
-    graph = result.diagram_graph
-    # A "diagram" with no edges is not a flowchart (e.g. a scanned table
-    # or list misclassified as DIAGRAM by the image rule) — embed the
-    # original image instead of rendering disconnected boxes.
-    if result.error or graph is None or not graph.edges:
-        logger.warning(
-            "No usable diagram for element %s (%s); embedding original image",
-            item.element.id,
-            result.error or "graph has no edges",
-        )
-        document.add_picture(BytesIO(image), width=Inches(4.5))
+
+    if result.text_content is not None and _add_text_content(
+        document, result.text_content
+    ):
         return
-    layouted = layout_graph(graph)
-    add_diagram_to_docx(
-        layouted,
-        document,
-        max_width_emu=_DIAGRAM_MAX_W,
-        max_height_emu=_DIAGRAM_MAX_H,
-        relative_from="paragraph",
+
+    graph = result.diagram_graph
+    if graph is not None and graph.edges:
+        layouted = layout_graph(graph)
+        add_diagram_to_docx(
+            layouted,
+            document,
+            max_width_emu=_DIAGRAM_MAX_W,
+            max_height_emu=_DIAGRAM_MAX_H,
+            relative_from="paragraph",
+        )
+        _flow_text_around(document)
+        return
+
+    logger.warning(
+        "No usable diagram/text for element %s (%s); embedding original image",
+        item.element.id,
+        result.error or "degenerate content",
     )
-    _flow_text_around(document)
+    document.add_picture(BytesIO(image), width=Inches(4.5))
+
+
+def _add_text_content(document: Document, text_content: TextContent) -> bool:
+    """Render a two-list matching question as a native 2-column table.
+
+    Left column = first list, right column = second list, one row per
+    line with the shorter column padded by empty cells. Returns False
+    (rendering nothing) when the content is not a usable two-list
+    structure, so the caller can fall back to the original image.
+    """
+    columns = text_content.usable_columns()
+    if columns is None:
+        return False
+    left, right = columns
+    n_rows = max(len(left.lines), len(right.lines))
+    table = document.add_table(rows=n_rows, cols=2)
+    table.style = "Table Grid"
+    for col_idx, column in enumerate((left, right)):
+        for row_idx, line in enumerate(column.lines):
+            cell = table.cell(row_idx, col_idx)
+            # A fresh cell has one empty paragraph; fill its runs.
+            _emit_runs(cell.paragraphs[0], line.to_run_dicts())
+    return True
 
 
 def _flow_text_around(document: Document) -> None:

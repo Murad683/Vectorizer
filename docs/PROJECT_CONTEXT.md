@@ -259,14 +259,50 @@ creates the Gemini provider).
 - **Subscripts**: the extractor now captures run-level
   `metadata["runs"]` (text + `vert_align`) for paragraphs containing
   subscript/superscript runs (e.g. q81's `41x + 36x = 77x`); both
-  assemblers re-emit them (`font.subscript` in docx, `baseline` rPr
-  attr in pptx). Note: the sample's real tables contain NO subscripts —
-  the "subscripted table" (q87) exists only as a scanned image.
-- **Vision fallback**: if vision errors OR returns a graph with no
-  edges (a scanned table/list misclassified as DIAGRAM by the
-  image→DIAGRAM rule — q87 triggers this), the assemblers embed the
-  ORIGINAL image instead of rendering disconnected boxes. A proper
-  photo-vs-diagram classifier rule is still future work.
+  assemblers re-emit them via a shared `_emit_runs` helper
+  (`font.subscript` in docx, `baseline` rPr attr in pptx). Note: the
+  sample's real native tables contain NO subscripts — the subscripted
+  q87 matching question exists only as a scanned image, now handled via
+  the vision content_type path below.
+- **Vision fallback**: if vision errors, OR returns a diagram with no
+  edges, OR returns TEXT_CONTENT that isn't a usable two-list structure,
+  the assemblers embed the ORIGINAL image instead of rendering broken
+  content. (Before the content_type change below, q87 fell through here.)
+
+### Vision content_type discriminator (in-vision text vs diagram)
+
+The classifier still routes every image to vision unchanged; the
+diagram-vs-text decision now happens INSIDE the single vision response.
+
+- **One call, discriminated envelope**: the Gemini `response_schema` is
+  `VisionAnalysis` (`models/document.py`): `content_type` ∈
+  {`diagram`, `text_content`} plus an optional `diagram`
+  (`DiagramGraph`) and `text_content` (`TextContent`). No second API
+  call. `VisionResult` gained `content_type` + `text_content`;
+  `diagram_graph` is unchanged, so the diagram path is untouched.
+- **TEXT_CONTENT schema** (`models/text_content.py`) — scoped to the
+  two-list *matching* structure actually seen (q87): `TextContent.lists`
+  → `LabeledList.lines` → `TextLine.runs` → `TextRun{text, subscript}`.
+  The label prefix ("1. ", "a. ") is part of the runs. Numeral-base
+  notation splits into a normal run + a `subscript=True` base run
+  (65₁₀ → `"65"` + `"10"`). `TextLine.to_run_dicts()` converts to the
+  SAME `{text, vert_align}` convention the extractor emits, so the
+  renderers reuse their existing subscript logic. Deliberately narrow:
+  only the two-list layout is supported; a single list (or all-empty
+  lists) is "not usable" → image fallback.
+- **Rendering** (`_add_text_content` in both assemblers, NOT routed
+  through `*_shapes.py`): a native 2-column table, left = first list,
+  right = second list, row count = the longer list, shorter column's
+  extra rows padded with empty cells (a natural matching-question
+  layout). Subscripts are real subscript runs via the shared
+  `_emit_runs`. In DOCX it's a "Table Grid" table in document flow; in
+  PPTX it flows inline with surrounding text (not its own slide — it's
+  textual content, unlike a diagram).
+- **Validated on the real sample**: live Gemini now classifies q87 as
+  TEXT_CONTENT and both outputs render it as an editable 3+5-line
+  2-column table with every subscript (65₁₀, 110011₂, 1B₁₆, 101₈, …)
+  correct — zero embedded pictures. q80 flowchart and the three native
+  tables are unaffected.
 - **DOCX wrapping**: the assembler post-processes each inserted diagram
   anchor from `wp:wrapNone` to `wp:wrapTopAndBottom` so following
   paragraphs flow below the canvas (docx_shapes itself is unchanged).

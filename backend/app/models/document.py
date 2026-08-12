@@ -7,6 +7,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from app.models.diagram import DiagramGraph
+from app.models.text_content import TextContent
 
 
 class ElementKind(str, Enum):
@@ -65,15 +66,38 @@ class ClassifiedElement(BaseModel):
     )
 
 
+class ContentType(str, Enum):
+    """What the vision model decided an image actually contains."""
+
+    DIAGRAM = "diagram"  # a flowchart → DiagramGraph
+    TEXT_CONTENT = "text_content"  # scanned text/matching lists → TextContent
+
+
 class VisionResult(BaseModel):
     """Outcome of a vision provider call.
 
-    A failed or malformed model response never raises out of the provider —
-    it produces a ``VisionResult`` with ``error`` set, to be handled
-    upstream.
+    Exactly one of ``diagram_graph`` / ``text_content`` is set on success,
+    per ``content_type``. A failed or malformed model response never
+    raises out of the provider — it produces a ``VisionResult`` with
+    ``error`` set, to be handled upstream.
     """
 
     raw_model_output: str = ""
+    content_type: ContentType | None = None
     diagram_graph: DiagramGraph | None = None
+    text_content: TextContent | None = None
     confidence_note: str | None = None
     error: str | None = None
+
+
+class VisionAnalysis(BaseModel):
+    """Discriminated envelope the vision model fills in ONE call.
+
+    ``content_type`` selects which payload is populated: ``diagram`` for a
+    flowchart, ``text_content`` for scanned text/matching lists. Used as
+    the Gemini ``response_schema``.
+    """
+
+    content_type: ContentType
+    diagram: DiagramGraph | None = None
+    text_content: TextContent | None = None

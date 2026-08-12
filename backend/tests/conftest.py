@@ -54,6 +54,12 @@ def flowchart_png_bytes() -> bytes:
 
 
 @pytest.fixture(scope="session")
+def table87_png_bytes() -> bytes:
+    """Raw bytes of the real question-87 matching-question image."""
+    return (SAMPLES_DIR / "table_87.png").read_bytes()
+
+
+@pytest.fixture(scope="session")
 def sample_pdf(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A PDF built from the real sample assets.
 

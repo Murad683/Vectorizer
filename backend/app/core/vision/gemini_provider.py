@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from app.config import get_settings
 from app.core.vision.base import VisionProvider
 from app.models.diagram import DiagramGraph
-from app.models.document import VisionResult
+from app.models.document import ContentType, VisionAnalysis, VisionResult
 
 logger = logging.getLogger(__name__)
 
@@ -26,24 +26,37 @@ _REQUEST_TIMEOUT_MS = 60_000
 _TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 
 _PROMPT = """\
-You are given a scanned image of an algorithm flowchart from an Azerbaijani \
-school informatics test. Extract its structure as JSON.
+You are given a scanned image from an Azerbaijani school informatics test.
+FIRST decide what it is, then extract it into the matching JSON payload.
 
-Rules:
-- One node per flowchart symbol. shape_type must be one of:
+Set "content_type" to:
+- "diagram" — an algorithm flowchart (boxes/diamonds/ovals joined by arrows).
+- "text_content" — textual content with NO flow arrows, e.g. a matching \
+question made of two labeled lists (a numbered list and a lettered list).
+
+If content_type is "diagram", fill "diagram" with {nodes, edges}:
+- One node per flowchart symbol. shape_type is one of:
   "terminator" (oval/stadium, e.g. Başlanğıc / Son),
   "process" (rectangle, e.g. assignments),
   "decision" (diamond, conditions),
   "input_output" (parallelogram, input or output of a variable).
-- "text" must contain the label EXACTLY as written, in Azerbaijani \
-(e.g. "Başlanğıc", "Son", "a = 3"). Do not translate or correct anything.
-- One edge per arrow, in the arrow's direction. Branch labels written on \
-arrows (e.g. "Hə", "Yox") go in that edge's "label"; set label to null \
-when the arrow has no label.
-- Give nodes short ids: "n1", "n2", ... in reading order (top to bottom).
-- Include loop-back arrows as ordinary edges pointing at the earlier node.
-- The JSON object MUST contain BOTH keys: "nodes" AND "edges". A flowchart
-  always has arrows, so "edges" must not be empty or omitted.
+- "text" is the label EXACTLY as written, in Azerbaijani. Do not translate.
+- One edge per arrow, in the arrow's direction. Branch labels on arrows \
+(e.g. "Hə", "Yox") go in that edge's "label"; null when the arrow has none.
+- Node ids "n1", "n2", ... in reading order. Include loop-back arrows.
+- A flowchart always has arrows, so "edges" must not be empty.
+Leave "text_content" null in this case.
+
+If content_type is "text_content", fill "text_content" with {lists}:
+- "lists" is an array of independent labeled lists in left-to-right order \
+(e.g. the numbered list first, then the lettered list).
+- Each list has "lines"; each line has "runs"; each run has "text" and \
+"subscript" (a boolean).
+- Preserve every character EXACTLY, including the label prefix ("1. ", \
+"a. "). Split numeral-base notation into runs: "65" (subscript false) then \
+"10" (subscript true) for 65 with a subscript 10. Only the base digits are \
+subscript.
+Leave "diagram" null in this case.
 """
 
 
@@ -54,21 +67,49 @@ def _is_transient(exc: Exception) -> bool:
     return isinstance(exc, ConnectionError | TimeoutError)
 
 
-def parse_diagram_graph(raw_output: str) -> DiagramGraph | None:
-    """Validate a JSON model response into a DiagramGraph, or None.
-
-    Empty edge labels are normalised to ``None``.
-    """
-    try:
-        graph = DiagramGraph.model_validate_json(raw_output)
-    except ValidationError:
-        return None
+def _normalise_graph(graph: DiagramGraph) -> DiagramGraph | None:
+    """Normalise edge labels; return None if the graph has no nodes."""
     for edge in graph.edges:
         if edge.label is not None and not edge.label.strip():
             edge.label = None
     if not graph.nodes:
         return None
     return graph
+
+
+def parse_diagram_graph(raw_output: str) -> DiagramGraph | None:
+    """Validate a bare DiagramGraph JSON response, or None.
+
+    Retained for direct-graph callers/tests; the envelope path uses
+    ``parse_vision_analysis``.
+    """
+    try:
+        graph = DiagramGraph.model_validate_json(raw_output)
+    except ValidationError:
+        return None
+    return _normalise_graph(graph)
+
+
+def parse_vision_analysis(raw_output: str) -> VisionAnalysis | None:
+    """Validate a VisionAnalysis envelope and its selected payload, or None.
+
+    A response is usable only when the payload matching ``content_type``
+    is present and non-degenerate: a diagram with nodes, or text content
+    with at least one non-empty list.
+    """
+    try:
+        analysis = VisionAnalysis.model_validate_json(raw_output)
+    except ValidationError:
+        return None
+    if analysis.content_type == ContentType.DIAGRAM:
+        if analysis.diagram is None or _normalise_graph(analysis.diagram) is None:
+            return None
+        return analysis
+    if analysis.text_content is None or not any(
+        lst.lines for lst in analysis.text_content.lists
+    ):
+        return None
+    return analysis
 
 
 class GeminiVisionProvider(VisionProvider):
@@ -84,17 +125,22 @@ class GeminiVisionProvider(VisionProvider):
         self._model_name = settings.gemini_model
         self._config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=DiagramGraph,
+            response_schema=VisionAnalysis,
             http_options=genai_types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
         )
 
     def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
-        """Ask Gemini to extract the flowchart structure as a DiagramGraph."""
+        """Classify the image and extract it in ONE call.
+
+        Method name kept for the interface; despite the name it also
+        handles TEXT_CONTENT images. Returns a ``VisionResult`` whose
+        ``content_type`` selects ``diagram_graph`` or ``text_content``.
+        """
         prompt = _PROMPT
         if context:
             prompt += (
-                "\nSurrounding text from the source document (for label "
-                f"context only, do not add it to the diagram):\n{context}"
+                "\nSurrounding text from the source document (for context "
+                f"only, do not add it to the output):\n{context}"
             )
         contents: list[str | genai_types.Part] = [
             genai_types.Part.from_bytes(data=image, mime_type="image/png"),
@@ -103,7 +149,7 @@ class GeminiVisionProvider(VisionProvider):
 
         last_error: Exception | None = None
         raw_output = ""
-        graph: DiagramGraph | None = None
+        analysis: VisionAnalysis | None = None
         for attempt in range(1 + _MAX_RETRIES):
             try:
                 response = self._client.models.generate_content(
@@ -114,14 +160,14 @@ class GeminiVisionProvider(VisionProvider):
                     config=self._config,
                 )
                 raw_output = response.text or ""
-                graph = parse_diagram_graph(raw_output)
-                if graph is not None:
+                analysis = parse_vision_analysis(raw_output)
+                if analysis is not None:
                     break
                 # Invalid/incomplete JSON is treated like a transient
-                # failure: the model often produces a complete graph on a
+                # failure: the model often produces a complete payload on a
                 # second attempt.
                 logger.warning(
-                    "Model returned invalid DiagramGraph JSON (attempt %d/%d)",
+                    "Model returned invalid VisionAnalysis JSON (attempt %d/%d)",
                     attempt + 1,
                     1 + _MAX_RETRIES,
                 )
@@ -152,16 +198,22 @@ class GeminiVisionProvider(VisionProvider):
             return VisionResult(
                 raw_model_output=raw_output,
                 error=(
-                    "Model response was not a valid DiagramGraph JSON "
+                    "Model response was not a valid VisionAnalysis JSON "
                     f"after {1 + _MAX_RETRIES} attempts."
                 ),
             )
 
+        note = f"Generated by {self._model_name}."
+        if analysis.content_type == ContentType.DIAGRAM:
+            return VisionResult(
+                raw_model_output=raw_output,
+                content_type=ContentType.DIAGRAM,
+                diagram_graph=analysis.diagram,
+                confidence_note=f"{note} Geometry computed downstream.",
+            )
         return VisionResult(
             raw_model_output=raw_output,
-            diagram_graph=graph,
-            confidence_note=(
-                f"Generated by {self._model_name}; geometry not included — "
-                "layout is computed downstream."
-            ),
+            content_type=ContentType.TEXT_CONTENT,
+            text_content=analysis.text_content,
+            confidence_note=f"{note} Extracted as text content, not a diagram.",
         )

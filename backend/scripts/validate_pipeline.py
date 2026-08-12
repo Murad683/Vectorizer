@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import docx  # noqa: E402
+from docx.shared import Emu  # noqa: E402
 from pptx import Presentation  # noqa: E402
 from pptx.util import Inches  # noqa: E402
 
@@ -22,6 +24,7 @@ from app.config import get_settings  # noqa: E402
 from app.core.classifier import classify_elements  # noqa: E402
 from app.core.ingestion import get_extractor  # noqa: E402
 from app.core.layout import layout_graph  # noqa: E402
+from app.core.render.docx_shapes import add_diagram_to_docx  # noqa: E402
 from app.core.render.pptx_shapes import add_diagram_to_slide  # noqa: E402
 from app.core.render.svg_debug import render_svg  # noqa: E402
 from app.core.vision import get_vision_provider  # noqa: E402
@@ -98,6 +101,20 @@ def main() -> int:
     pptx_path = OUTPUT / "flowchart_diagram.pptx"
     prs.save(str(pptx_path))
     print(f"Saved native-shape PPTX (open by hand to verify!): {pptx_path}")
+
+    document = docx.Document()
+    add_diagram_to_docx(
+        layouted,
+        document,
+        offset_x_emu=Emu(0),
+        offset_y_emu=Emu(0),
+        max_width_emu=Emu(int(6.5 * 914400)),  # letter width minus 1" margins
+        max_height_emu=Emu(int(8.5 * 914400)),
+        relative_from="paragraph",
+    )
+    docx_path = OUTPUT / "flowchart_diagram.docx"
+    document.save(str(docx_path))
+    print(f"Saved native-shape DOCX (open by hand in Word to verify!): {docx_path}")
     return 0
 
 

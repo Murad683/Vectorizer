@@ -170,12 +170,42 @@ retried like a transient error (same ×2 budget), then reported via
   small borderless text boxes. 1 layout px = 9525 EMU; diagrams are
   uniformly scaled down (never up) to fit the given slide bounds.
 
-### DOCX native shapes — DEFERRED TO PHASE 4 (do not re-litigate)
+### DOCX native shapes — BUILT IN PHASE 4 (`app/core/render/docx_shapes.py`)
 
 python-pptx has first-class AutoShape/connector APIs, so PPTX was built
-first to prove the shape model. python-docx has NO equivalent — native
-shapes in .docx require hand-building OOXML DrawingML
-(`w:drawing`/`wps:wsp`) XML and injecting it into the body. That is a
-separate, harder task and gets its own phase now that the shape model is
-proven. Full document assembly (mixing text/tables/diagrams into one
-output) is also still pending.
+first (Phase 3) to prove the shape model. python-docx has NO equivalent —
+`docx_shapes.py` hand-builds WordprocessingML Drawing XML
+(`wp:anchor` → `a:graphic` → `wps:wsp`, Word 2010+ wordprocessingShape)
+as strings, parses with lxml, and injects the result into
+`document.element.body` before `w:sectPr`. python-docx is used only for
+document creation/saving.
+
+- **Input contract**: the SAME `LayoutedGraph` as `pptx_shapes` — both
+  renderers consume one layout computation, so the next phase (document
+  assembly) can target either format.
+- **shape_type → prstGeom**: TERMINATOR → `roundRect`, PROCESS → `rect`,
+  DECISION → `diamond`, INPUT_OUTPUT → `parallelogram` (DrawingML preset
+  names; same four symbols as the PPTX MSO_SHAPE mapping).
+- **Text**: real editable runs inside `wps:txbx`/`w:txbxContent`,
+  centred, font size from the same fit logic as PPTX
+  (`pptx_shapes._font_size_for` is reused, 1 px = 9525 EMU).
+- **Connectors**: `wps:wsp` with `wps:cNvCnPr` — `line` preset for
+  same-column edges, `bentConnector2` for decision branches (exit side
+  at mid-height, one bend, arrive at target top). Direction is encoded
+  via flipH/flipV on `a:xfrm` (DrawingML extents must be positive).
+  Arrowheads via `a:tailEnd type="triangle"`. Word connectors here are
+  free-floating (no stCxn/endCxn attachment — that only works inside a
+  drawing canvas, deliberately not used).
+- **Back-edge**: the exact 3-segment rail route from
+  `pptx_shapes._add_back_edge` (rail = rightmost shape edge + 50 px via
+  the shared `_rail_x`); arrowhead only on the final segment.
+- **Anchoring decision**: all drawings of a diagram live in ONE
+  paragraph (one `w:r` per drawing), `relativeFrom="paragraph"` for both
+  positionH and positionV. Rationale: every shape is positioned against
+  the same anchor paragraph, so later edits/reflow move the whole
+  diagram as one unit — shapes cannot drift apart; with
+  `relativeFrom="page"` (still supported via the `relative_from` arg)
+  text inserted above would slide under the pinned diagram instead.
+
+Full document assembly (mixing text/tables/diagrams into one output) is
+still pending — next phase.

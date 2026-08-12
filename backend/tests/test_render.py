@@ -106,23 +106,37 @@ class TestPptxShapes:
         prs = Presentation(str(path))
         slide = prs.slides[0]
         connectors = [s for s in slide.shapes if isinstance(s, Connector)]
-        # 7 forward edges (one connector each) + the back-edge as an
-        # explicit 3-segment rail route = 10 connectors.
-        forward_edges = [e for e in flowchart_graph.edges]
-        assert len(connectors) == (len(forward_edges) - 1) + 3
-        # Attachment is stored as a:stCxn / a:endCxn in the connector XML.
+        # One connector per edge — the back-edge is a SINGLE bent
+        # connector, not stitched segments.
+        assert len(connectors) == len(flowchart_graph.edges)
+        # Every connector is attached at BOTH ends (a:stCxn / a:endCxn).
         ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
-        st_attached = sum(
-            1 for c in connectors if c._element.find(".//a:stCxn", ns) is not None
-        )
-        end_attached = sum(
-            1 for c in connectors if c._element.find(".//a:endCxn", ns) is not None
-        )
-        # Every forward connector is attached at both ends; the back-edge
-        # chain is attached at its outermost ends only (first segment's
-        # begin on the source, last segment's end on the target).
-        assert st_attached == (len(forward_edges) - 1) + 1
-        assert end_attached == (len(forward_edges) - 1) + 1
+        for connector in connectors:
+            assert connector._element.find(".//a:stCxn", ns) is not None
+            assert connector._element.find(".//a:endCxn", ns) is not None
+
+    def test_back_edge_is_single_bent_connector_with_rail_adj(
+        self, flowchart_graph: DiagramGraph, tmp_path: Path
+    ) -> None:
+        path = self._build_pptx(flowchart_graph, tmp_path / "diagram.pptx")
+        prs = Presentation(str(path))
+        slide = prs.slides[0]
+        ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+        bent = [
+            s
+            for s in slide.shapes
+            if isinstance(s, Connector)
+            and s._element.find(".//a:prstGeom", ns).get("prst") == "bentConnector3"
+            # back-edge: both ends on the shapes' right side (idx 3)
+            and s._element.find(".//a:stCxn", ns).get("idx") == "3"
+            and s._element.find(".//a:endCxn", ns).get("idx") == "3"
+        ]
+        assert len(bent) == 1
+        gd = bent[0]._element.find(".//a:prstGeom/a:avLst/a:gd", ns)
+        assert gd is not None and gd.get("name") == "adj1"
+        # Ratio-based rail: negative places the vertical segment right of
+        # the source, outside the endpoints' bounding box.
+        assert int(gd.get("fmla").split()[1]) < 0
 
     def test_edge_labels_become_text_boxes(
         self, flowchart_graph: DiagramGraph, tmp_path: Path

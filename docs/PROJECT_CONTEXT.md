@@ -164,11 +164,23 @@ retried like a transient error (same ×2 budget), then reported via
 - `pptx_shapes.py` — the client deliverable for diagrams. Mapping:
   TERMINATOR → `MSO_SHAPE.ROUNDED_RECTANGLE`, PROCESS → `RECTANGLE`,
   DECISION → `DIAMOND`, INPUT_OUTPUT → `PARALLELOGRAM`. Real text frames
-  (editable, Azerbaijani intact), native connectors attached via
-  `begin_connect`/`end_connect` (arrows follow dragged shapes),
-  back-edges as elbow connectors right-side to right-side, edge labels as
-  small borderless text boxes. 1 layout px = 9525 EMU; diagrams are
-  uniformly scaled down (never up) to fit the given slide bounds.
+  (editable, Azerbaijani intact), native connectors attached at BOTH
+  ends via `begin_connect`/`end_connect` (arrows follow dragged shapes),
+  edge labels as small borderless text boxes. 1 layout px = 9525 EMU;
+  diagrams are uniformly scaled down (never up) to fit the slide bounds.
+  **Back-edge**: ONE `bentConnector3` (MSO_CONNECTOR.ELBOW) attached
+  right-side (idx 3) to right-side (idx 3), with an explicit `adj1`
+  adjustment value placing the vertical rail as a RATIO of the
+  horizontal span between the connection points:
+  `adj1 = (rail − source_right)/(target_right − source_right) × 100000`
+  (negative in the normal loop case — the bend sits outside the
+  endpoints' bounding box, right of the source). Computed by
+  `back_edge_rail_adj()` (shared with the DOCX renderer); the rail
+  clearance itself still comes from `_rail_x` (rightmost shape + 50 px).
+  Because adj is a ratio, Office recomputes the entire path — including
+  the rail — when either shape is dragged. The earlier 3-stitched-
+  segments approach (fixed waypoints, attached at outer ends only,
+  floating middle when shapes moved) is removed.
 
 ### DOCX native shapes — `app/core/render/docx_shapes.py` (Phase 4,
 ### restructured in Phase 4b)
@@ -203,19 +215,21 @@ per-shape anchors. Canvas extent = graph bounds + the back-edge rail.
 - **Text**: real editable runs inside `wps:txbx`/`w:txbxContent`,
   centred; font size reuses `pptx_shapes._font_size_for` (1 px = 9525
   EMU).
-- **Connectors are genuinely attached**: each shape carries a stable
-  `wps:cNvPr id` (2, 3, …; id 1 is the anchor's `wp:docPr`), and each
-  connector's `wps:cNvCnPr` holds `a:stCxn`/`a:endCxn` referencing those
-  sibling ids + connection-site idx (0=top, 1=left, 2=bottom, 3=right) —
-  dragging a shape in Word drags its arrows. This only works inside a
-  canvas, which is why Phase 4's per-shape anchors could not provide it.
+- **Connectors are genuinely attached — ALL of them, at BOTH ends**:
+  each shape carries a stable `wps:cNvPr id` (2, 3, …; id 1 is the
+  anchor's `wp:docPr`), and every connector's `wps:cNvCnPr` holds
+  `a:stCxn` AND `a:endCxn` referencing those sibling ids +
+  connection-site idx (0=top, 1=left, 2=bottom, 3=right) — dragging a
+  shape in Word drags its arrows. This only works inside a canvas,
+  which is why Phase 4's per-shape anchors could not provide it.
   Presets: `line` for same-column edges, `bentConnector2` for decision
   branches; direction via flipH/flipV (extents must be positive);
   arrowheads via `a:tailEnd type="triangle"`.
-- **Back-edge**: the exact 3-segment rail route from
-  `pptx_shapes._add_back_edge` (rail = rightmost shape edge + 50 px via
-  shared `_rail_x`); attached at its outer ends only; arrowhead only on
-  the final segment.
+- **Back-edge (single attached connector — same fix as PPTX)**: ONE
+  `bentConnector3` `wps:wsp` with `a:stCxn`/`a:endCxn` on the source's
+  and target's right sides (idx 3) and the same ratio-based `adj1` from
+  the shared `pptx_shapes.back_edge_rail_adj()`. No stitched segments,
+  no fixed waypoints — Word recomputes the whole path on drag.
 - **Anchoring decision**: `relative_from="paragraph"` (default) maps to
   positionH `relativeFrom="column"` + positionV
   `relativeFrom="paragraph"` — the whole canvas flows with its anchor

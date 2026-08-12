@@ -10,7 +10,8 @@ import logging
 
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
-from pptx.shapes.base import BaseShape
+from pptx.oxml.ns import qn
+from pptx.shapes.connector import Connector
 from pptx.slide import Slide
 from pptx.util import Emu, Pt
 
@@ -107,33 +108,23 @@ def add_diagram_to_slide(
         target_node = graph.node_by_id(edge.target_id)
 
         if edge.is_back_edge:
-            # PowerPoint's bentConnector auto-routing draws this loop
-            # through the middle of the diagram, so the route is built
-            # manually as three straight segments on a vertical rail to
-            # the right of all shapes — mirroring svg_debug.py's routing.
-            _add_back_edge(
-                slide,
-                source,
-                target,
-                source_node,
-                target_node,
-                rail_x=_rail_x(graph),
-                scale=scale,
-                offset_x_emu=offset_x_emu,
-                offset_y_emu=offset_y_emu,
+            # One bentConnector3 (right → up → left), attached at BOTH
+            # ends so Office recomputes the whole path when shapes move.
+            # adj1 places the vertical rail as a RATIO of the horizontal
+            # span between the two connection points (negative = outside
+            # the bounding box, i.e. right of the source), reproducing
+            # _rail_x's clearance without any fixed waypoint coordinates.
+            connector = slide.shapes.add_connector(
+                MSO_CONNECTOR.ELBOW, Emu(0), Emu(0), Emu(0), Emu(0)
             )
-            if edge.label:
-                _add_edge_label(
-                    slide,
-                    edge.label,
-                    source_node,
-                    target_node,
-                    scale,
-                    offset_x_emu,
-                    offset_y_emu,
-                )
-            continue
-        if (
+            connector.begin_connect(source, _CXN_RIGHT)
+            connector.end_connect(target, _CXN_RIGHT)
+            _set_connector_adj(
+                connector,
+                "adj1",
+                back_edge_rail_adj(source_node, target_node, _rail_x(graph)),
+            )
+        elif (
             abs(
                 (source_node.x + source_node.width / 2)
                 - (target_node.x + target_node.width / 2)
@@ -183,50 +174,41 @@ def _rail_x(graph: LayoutedGraph) -> float:
     return max(n.x + n.width for n in graph.nodes) + _RAIL_OFFSET_PX
 
 
-def _add_back_edge(
-    slide: Slide,
-    source: BaseShape,
-    target: BaseShape,
-    source_node: LayoutedNode,
-    target_node: LayoutedNode,
-    *,
-    rail_x: float,
-    scale: float,
-    offset_x_emu: int,
-    offset_y_emu: int,
-) -> None:
-    """Route a loop as three explicit straight segments around the diagram.
+def back_edge_rail_adj(
+    source_node: LayoutedNode, target_node: LayoutedNode, rail_px: float
+) -> int:
+    """adj1 value (100000 = 100%) placing a bentConnector3's vertical
+    segment on the back-edge rail.
 
-    source right-mid → (rail, source y) → (rail, target y) → target
-    right-mid. The first segment stays attached to the source shape and
-    the last to the target shape; the rail waypoints are fixed
-    coordinates, never auto-routed.
+    The ratio is measured along the horizontal span between the two
+    connection points (source right-mid → target right-mid), so it stays
+    correct when Office rescales the connector after a shape is dragged
+    — no absolute coordinates involved. With the target left of the
+    source (the normal loop case) the value is negative: the vertical
+    segment sits outside the endpoints' bounding box, right of the
+    source, exactly where the rail belongs.
     """
-
-    def ex(px: float) -> Emu:
-        return Emu(offset_x_emu + int(px * scale * _EMU_PER_PX))
-
-    def ey(px: float) -> Emu:
-        return Emu(offset_y_emu + int(px * scale * _EMU_PER_PX))
-
     sx = source_node.x + source_node.width
-    sy = source_node.y + source_node.height / 2
     tx = target_node.x + target_node.width
-    ty = target_node.y + target_node.height / 2
+    span = tx - sx
+    if abs(span) < 1.0:
+        # Degenerate: both right edges aligned — a ratio cannot express
+        # an absolute clearance over a zero span. Fall back to one span
+        # of clearance to the right rather than dividing by ~zero.
+        return -100000
+    return round((rail_px - sx) / span * 100000)
 
-    out = slide.shapes.add_connector(
-        MSO_CONNECTOR.STRAIGHT, ex(sx), ey(sy), ex(rail_x), ey(sy)
-    )
-    out.begin_connect(source, _CXN_RIGHT)
-    up = slide.shapes.add_connector(
-        MSO_CONNECTOR.STRAIGHT, ex(rail_x), ey(sy), ex(rail_x), ey(ty)
-    )
-    back_in = slide.shapes.add_connector(
-        MSO_CONNECTOR.STRAIGHT, ex(rail_x), ey(ty), ex(tx), ey(ty)
-    )
-    back_in.end_connect(target, _CXN_RIGHT)
-    for segment in (out, up, back_in):
-        segment.line.width = Pt(1.5)
+
+def _set_connector_adj(connector: Connector, name: str, val: int) -> None:
+    """Set an explicit adjustment value on a connector's preset geometry."""
+    prst_geom = connector._element.spPr.find(qn("a:prstGeom"))
+    assert prst_geom is not None  # add_connector always writes a prstGeom
+    av_lst = prst_geom.find(qn("a:avLst"))
+    if av_lst is None:
+        av_lst = prst_geom.makeelement(qn("a:avLst"), {})
+        prst_geom.append(av_lst)
+    gd = av_lst.makeelement(qn("a:gd"), {"name": name, "fmla": f"val {val}"})
+    av_lst.append(gd)
 
 
 def _add_edge_label(

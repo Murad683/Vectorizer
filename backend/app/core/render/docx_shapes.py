@@ -27,7 +27,7 @@ from xml.sax.saxutils import escape
 from docx.document import Document
 from lxml import etree
 
-from app.core.render.pptx_shapes import _font_size_for, _rail_x
+from app.core.render.pptx_shapes import _font_size_for, _rail_x, back_edge_rail_adj
 from app.models.diagram import LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -105,18 +105,21 @@ def _connector_wsp(
     cx: int,
     cy: int,
     flip: str,
-    start: tuple[int, int] | None,
-    end: tuple[int, int] | None,
+    start: tuple[int, int],
+    end: tuple[int, int],
     arrow: bool = True,
+    adj: dict[str, int] | None = None,
 ) -> str:
-    """A wps:wsp connector, attached via stCxn/endCxn where given.
+    """A wps:wsp connector, attached at both ends via stCxn/endCxn.
 
     ``start``/``end`` are (shape_id, connection_site_idx) of sibling
-    shapes inside the same canvas, or None for a free endpoint.
+    shapes inside the same canvas. ``adj`` holds explicit adjustment
+    values for the preset geometry (e.g. ``{"adj1": -21739}``).
     """
-    st = f'<a:stCxn id="{start[0]}" idx="{start[1]}"/>' if start else ""
-    en = f'<a:endCxn id="{end[0]}" idx="{end[1]}"/>' if end else ""
+    st = f'<a:stCxn id="{start[0]}" idx="{start[1]}"/>'
+    en = f'<a:endCxn id="{end[0]}" idx="{end[1]}"/>'
     tail = '<a:tailEnd type="triangle"/>' if arrow else ""
+    av = "".join(f'<a:gd name="{n}" fmla="val {v}"/>' for n, v in (adj or {}).items())
     return (
         "<wps:wsp>"
         f'<wps:cNvPr id="{shape_id}" name="{escape(name)}"/>'
@@ -124,7 +127,7 @@ def _connector_wsp(
         "<wps:spPr>"
         f'<a:xfrm{flip}><a:off x="{x}" y="{y}"/>'
         f'<a:ext cx="{max(cx, 1)}" cy="{max(cy, 1)}"/></a:xfrm>'
-        f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
+        f'<a:prstGeom prst="{prst}"><a:avLst>{av}</a:avLst></a:prstGeom>'
         f'<a:ln w="{_LINE_WIDTH_EMU}">'
         f'<a:solidFill><a:srgbClr val="000000"/></a:solidFill>{tail}</a:ln>'
         "</wps:spPr>"
@@ -251,37 +254,33 @@ def add_diagram_to_docx(
         source_id = ids_by_node[edge.source_id]
         target_id = ids_by_node[edge.target_id]
         if edge.is_back_edge:
-            # Same 3-segment rail route as pptx_shapes._add_back_edge:
-            # source right-mid → (rail, sy) → (rail, ty) → target right-mid.
+            # ONE bentConnector3 (right → up → left) attached at both
+            # ends, so Word recomputes the whole path when shapes move.
+            # adj1 places the vertical rail as a ratio of the horizontal
+            # span between the connection points (negative = outside the
+            # bounding box, right of the source) — same computation as
+            # the PPTX renderer, no fixed waypoint coordinates.
             sx = source.x + source.width
             sy = source.y + source.height / 2
             tx = target.x + target.width
             ty = target.y + target.height / 2
-            segments = [
-                (sx, sy, rail, sy),
-                (rail, sy, rail, ty),
-                (rail, ty, tx, ty),
-            ]
-            for i, (x0, y0, x1, y1) in enumerate(segments):
-                x, y, w, h, flip = _segment(x0, y0, x1, y1)
-                last = i == len(segments) - 1
-                children.append(
-                    _connector_wsp(
-                        shape_id=next_id,
-                        name=f"backedge-{edge.source_id}-{edge.target_id}-{i}",
-                        prst="line",
-                        x=emu(x),
-                        y=emu(y),
-                        cx=emu(w),
-                        cy=emu(h),
-                        flip=flip,
-                        start=(source_id, _CXN_RIGHT) if i == 0 else None,
-                        end=(target_id, _CXN_RIGHT) if last else None,
-                        # Arrowhead only on the segment entering the target.
-                        arrow=last,
-                    )
+            x, y, w, h, flip = _segment(sx, sy, tx, ty)
+            children.append(
+                _connector_wsp(
+                    shape_id=next_id,
+                    name=f"backedge-{edge.source_id}-{edge.target_id}",
+                    prst="bentConnector3",
+                    x=emu(x),
+                    y=emu(y),
+                    cx=emu(w),
+                    cy=emu(h),
+                    flip=flip,
+                    start=(source_id, _CXN_RIGHT),
+                    end=(target_id, _CXN_RIGHT),
+                    adj={"adj1": back_edge_rail_adj(source, target, rail)},
                 )
-                next_id += 1
+            )
+            next_id += 1
         else:
             source_cx = source.x + source.width / 2
             target_cx = target.x + target.width / 2

@@ -136,45 +136,54 @@ class TestDocxCanvas:
         path = _build_docx(flowchart_graph, tmp_path / "diagram.docx")
         body = _body(path)
         connectors = body.findall(".//wps:wsp[wps:cNvCnPr]", _NS)
-        # 7 forward edges + 3 back-edge rail segments.
-        assert len(connectors) == 10
+        # One connector per edge — back-edge is a single bent connector.
+        assert len(connectors) == 8
         shape_ids = {
             s.find("wps:cNvPr", _NS).get("id")
             for s in body.findall(".//wps:wsp[wps:cNvSpPr]", _NS)
         }
-        st = body.findall(".//wps:cNvCnPr/a:stCxn", _NS)
-        en = body.findall(".//wps:cNvCnPr/a:endCxn", _NS)
-        # 7 forward connectors attached at both ends; the back-edge chain
-        # only at its outermost ends (first segment start, last segment end).
-        assert len(st) == 8
-        assert len(en) == 8
-        for cxn in st + en:
-            assert cxn.get("id") in shape_ids  # references a real sibling
+        # EVERY connector is attached at both ends.
+        for connector in connectors:
+            st = connector.find("wps:cNvCnPr/a:stCxn", _NS)
+            en = connector.find("wps:cNvCnPr/a:endCxn", _NS)
+            assert st is not None and en is not None
+            assert st.get("id") in shape_ids
+            assert en.get("id") in shape_ids
 
-    def test_back_edge_rail_clears_all_shapes(
+    def test_back_edge_is_single_bent_connector_clearing_shapes(
         self, flowchart_graph: DiagramGraph, tmp_path: Path
     ) -> None:
         path = _build_docx(flowchart_graph, tmp_path / "diagram.docx")
         body = _body(path)
-        rail_segments = [
+        back_edges = [
             w
             for w in body.findall(".//wps:wsp", _NS)
             if w.find("wps:cNvPr", _NS).get("name", "").startswith("backedge")
         ]
-        assert len(rail_segments) == 3
-        # The vertical rail segment must start right of every node shape.
+        # A SINGLE bent connector, attached at both ends on the right side.
+        assert len(back_edges) == 1
+        back = back_edges[0]
+        assert back.find(".//a:prstGeom", _NS).get("prst") == "bentConnector3"
+        assert back.find("wps:cNvCnPr/a:stCxn", _NS).get("idx") == "3"
+        assert back.find("wps:cNvCnPr/a:endCxn", _NS).get("idx") == "3"
+        # adj1 is ratio-based and negative: the vertical rail lies outside
+        # the endpoints' bounding box (right of the source shape). Verify
+        # the resulting absolute rail x clears every node shape.
+        gd = back.find(".//a:prstGeom/a:avLst/a:gd", _NS)
+        assert gd.get("name") == "adj1"
+        adj = int(gd.get("fmla").split()[1])
+        assert adj < 0
+        xfrm_off = back.find(".//a:off", _NS)
+        xfrm_ext = back.find(".//a:ext", _NS)
+        x, cx = int(xfrm_off.get("x")), int(xfrm_ext.get("cx"))
+        # flipH: local x=adj*cx maps to real x = right_edge - adj*cx.
+        rail_x = (x + cx) - adj / 100000 * cx
         node_rights = [
             int(s.find(".//a:off", _NS).get("x"))
             + int(s.find(".//a:ext", _NS).get("cx"))
             for s in body.findall(".//wps:wsp[wps:cNvSpPr]", _NS)
             if s.find("wps:cNvPr", _NS).get("name", "").startswith("node-")
         ]
-        vertical = next(
-            s
-            for s in rail_segments
-            if s.find("wps:cNvPr", _NS).get("name").endswith("-1")
-        )
-        rail_x = int(vertical.find(".//a:off", _NS).get("x"))
         assert rail_x > max(node_rights)
 
     def test_unique_cnvpr_ids(

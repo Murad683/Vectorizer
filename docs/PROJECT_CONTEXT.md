@@ -170,42 +170,57 @@ retried like a transient error (same ×2 budget), then reported via
   small borderless text boxes. 1 layout px = 9525 EMU; diagrams are
   uniformly scaled down (never up) to fit the given slide bounds.
 
-### DOCX native shapes — BUILT IN PHASE 4 (`app/core/render/docx_shapes.py`)
+### DOCX native shapes — `app/core/render/docx_shapes.py` (Phase 4,
+### restructured in Phase 4b)
 
 python-pptx has first-class AutoShape/connector APIs, so PPTX was built
 first (Phase 3) to prove the shape model. python-docx has NO equivalent —
-`docx_shapes.py` hand-builds WordprocessingML Drawing XML
-(`wp:anchor` → `a:graphic` → `wps:wsp`, Word 2010+ wordprocessingShape)
-as strings, parses with lxml, and injects the result into
-`document.element.body` before `w:sectPr`. python-docx is used only for
-document creation/saving.
+`docx_shapes.py` hand-builds WordprocessingML Drawing XML as strings,
+parses with lxml, and injects into `document.element.body` before
+`w:sectPr`. python-docx is used only for document creation/saving.
+
+**Phase 4b root cause of the original "Word cannot open" failure:**
+Phase 4 wrote `wp:positionH relativeFrom="paragraph"` on every anchor.
+`ST_RelFromH` has NO "paragraph" value (it exists only in `ST_RelFromV`);
+valid H values are character/column/insideMargin/leftMargin/margin/
+outsideMargin/page/rightMargin. Word hard-fails on the invalid enum with
+the generic open error (not the repair dialog). lxml cannot catch this —
+it is schema-level, not well-formedness. The legal value sets are pinned
+in `tests/test_docx_shapes.py`.
+
+**Structure (Phase 4b): one `wpc:wpc` drawing canvas per diagram.**
+A single `w:p` → `w:r` → `w:drawing` → `wp:anchor` holds one
+`a:graphicData uri=".../wordprocessingCanvas"` → `wpc:wpc`. ALL shapes
+and connectors are `wps:wsp` children of that canvas, positioned in the
+canvas' own EMU coordinate space (origin = canvas top-left) — no
+per-shape anchors. Canvas extent = graph bounds + the back-edge rail.
 
 - **Input contract**: the SAME `LayoutedGraph` as `pptx_shapes` — both
   renderers consume one layout computation, so the next phase (document
   assembly) can target either format.
 - **shape_type → prstGeom**: TERMINATOR → `roundRect`, PROCESS → `rect`,
-  DECISION → `diamond`, INPUT_OUTPUT → `parallelogram` (DrawingML preset
-  names; same four symbols as the PPTX MSO_SHAPE mapping).
+  DECISION → `diamond`, INPUT_OUTPUT → `parallelogram`.
 - **Text**: real editable runs inside `wps:txbx`/`w:txbxContent`,
-  centred, font size from the same fit logic as PPTX
-  (`pptx_shapes._font_size_for` is reused, 1 px = 9525 EMU).
-- **Connectors**: `wps:wsp` with `wps:cNvCnPr` — `line` preset for
-  same-column edges, `bentConnector2` for decision branches (exit side
-  at mid-height, one bend, arrive at target top). Direction is encoded
-  via flipH/flipV on `a:xfrm` (DrawingML extents must be positive).
-  Arrowheads via `a:tailEnd type="triangle"`. Word connectors here are
-  free-floating (no stCxn/endCxn attachment — that only works inside a
-  drawing canvas, deliberately not used).
+  centred; font size reuses `pptx_shapes._font_size_for` (1 px = 9525
+  EMU).
+- **Connectors are genuinely attached**: each shape carries a stable
+  `wps:cNvPr id` (2, 3, …; id 1 is the anchor's `wp:docPr`), and each
+  connector's `wps:cNvCnPr` holds `a:stCxn`/`a:endCxn` referencing those
+  sibling ids + connection-site idx (0=top, 1=left, 2=bottom, 3=right) —
+  dragging a shape in Word drags its arrows. This only works inside a
+  canvas, which is why Phase 4's per-shape anchors could not provide it.
+  Presets: `line` for same-column edges, `bentConnector2` for decision
+  branches; direction via flipH/flipV (extents must be positive);
+  arrowheads via `a:tailEnd type="triangle"`.
 - **Back-edge**: the exact 3-segment rail route from
   `pptx_shapes._add_back_edge` (rail = rightmost shape edge + 50 px via
-  the shared `_rail_x`); arrowhead only on the final segment.
-- **Anchoring decision**: all drawings of a diagram live in ONE
-  paragraph (one `w:r` per drawing), `relativeFrom="paragraph"` for both
-  positionH and positionV. Rationale: every shape is positioned against
-  the same anchor paragraph, so later edits/reflow move the whole
-  diagram as one unit — shapes cannot drift apart; with
-  `relativeFrom="page"` (still supported via the `relative_from` arg)
-  text inserted above would slide under the pinned diagram instead.
+  shared `_rail_x`); attached at its outer ends only; arrowhead only on
+  the final segment.
+- **Anchoring decision**: `relative_from="paragraph"` (default) maps to
+  positionH `relativeFrom="column"` + positionV
+  `relativeFrom="paragraph"` — the whole canvas flows with its anchor
+  paragraph as one unit. `"page"` pins both axes to the page (text would
+  reflow underneath; not the document default).
 
 Full document assembly (mixing text/tables/diagrams into one output) is
 still pending — next phase.

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.core.auth.models import Role
 from app.core.auth.security import hash_password
-from app.core.auth.store import UserStore
+from app.core.auth.store import RefreshTokenStore, UserStore
 from app.core.queue.store import JobStore
 from app.main import create_app
 
@@ -23,13 +23,15 @@ async def _noop_lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 @pytest.fixture()
-def _stores(job_store: JobStore, user_store: UserStore):
-    return job_store, user_store
+def _stores(
+    job_store: JobStore, user_store: UserStore, refresh_token_store: RefreshTokenStore
+):
+    return job_store, user_store, refresh_token_store
 
 
 @pytest.fixture()
 def client(_stores) -> TestClient:
-    job_store, user_store = _stores
+    job_store, user_store, refresh_token_store = _stores
     user_store.create_user(
         user_id=uuid4(),
         email="admin@test.com",
@@ -40,6 +42,7 @@ def client(_stores) -> TestClient:
     app.router.lifespan_context = _noop_lifespan
     app.state.job_store = job_store
     app.state.user_store = user_store
+    app.state.refresh_token_store = refresh_token_store
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
@@ -86,6 +89,123 @@ class TestLogin:
         body2, status2 = _login(client, "nobody@test.com", "whatever")
         assert status1 == status2 == 401
         assert body1["message"] == body2["message"]
+
+
+class TestRefreshFlow:
+    def test_login_sets_refresh_cookie(self, client: TestClient) -> None:
+        resp = client.post(
+            "/auth/login", json={"email": "admin@test.com", "password": "adminpass"}
+        )
+        assert resp.status_code == 200
+        assert "refresh_token" in resp.cookies
+        # Never leaked in the JSON body.
+        assert "refresh_token" not in resp.json()
+
+    def test_refresh_with_valid_cookie_succeeds(self, client: TestClient) -> None:
+        client.post(
+            "/auth/login", json={"email": "admin@test.com", "password": "adminpass"}
+        )
+        resp = client.post("/auth/refresh")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "access_token" in body
+        # The new access token is actually usable.
+        resp2 = client.get(
+            "/jobs/00000000-0000-0000-0000-000000000000",
+            headers=_auth(body["access_token"]),
+        )
+        assert resp2.status_code == 404  # authenticated, just no such job
+
+    def test_refresh_without_cookie_401(self, client: TestClient) -> None:
+        resp = client.post("/auth/refresh")
+        assert resp.status_code == 401
+        assert resp.json()["error_code"] == "invalid_refresh_token"
+
+    def test_refresh_with_tampered_cookie_401(self, client: TestClient) -> None:
+        client.post(
+            "/auth/login", json={"email": "admin@test.com", "password": "adminpass"}
+        )
+        client.cookies.set("refresh_token", "not-a-real-token")
+        resp = client.post("/auth/refresh")
+        assert resp.status_code == 401
+
+    def test_refresh_rotates_and_old_token_cannot_be_reused(
+        self, client: TestClient
+    ) -> None:
+        client.post(
+            "/auth/login", json={"email": "admin@test.com", "password": "adminpass"}
+        )
+        old_cookie = client.cookies.get("refresh_token")
+        resp = client.post("/auth/refresh")
+        assert resp.status_code == 200
+        new_cookie = client.cookies.get("refresh_token")
+        assert new_cookie != old_cookie
+
+        # Replay the old (now-revoked) cookie.
+        client.cookies.set("refresh_token", old_cookie)
+        resp2 = client.post("/auth/refresh")
+        assert resp2.status_code == 401
+
+    def test_refresh_with_expired_token_401(
+        self, client: TestClient, refresh_token_store: RefreshTokenStore
+    ) -> None:
+        from datetime import datetime, timedelta, timezone
+        from uuid import uuid4 as _uuid4
+
+        from app.core.auth.security import hash_refresh_token
+
+        client.post(
+            "/auth/login", json={"email": "admin@test.com", "password": "adminpass"}
+        )
+        raw = "expired-raw-token"
+        admin = client.app.state.user_store.get_user_by_email(  # type: ignore[union-attr]
+            "admin@test.com"
+        )
+        refresh_token_store.create(
+            token_id=_uuid4(),
+            user_id=admin.id,
+            token_hash=hash_refresh_token(raw),
+            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        client.cookies.set("refresh_token", raw)
+        resp = client.post("/auth/refresh")
+        assert resp.status_code == 401
+
+    def test_refresh_for_deactivated_user_401(self, client: TestClient) -> None:
+        admin_token = _token(client)
+        client.post(
+            "/users",
+            json={"email": "member@test.com", "password": "memberpass"},
+            headers=_auth(admin_token),
+        )
+        # Log in as member (sets the member's refresh cookie in the jar).
+        client.post(
+            "/auth/login", json={"email": "member@test.com", "password": "memberpass"}
+        )
+        resp = client.get("/users", headers=_auth(admin_token))
+        member_id = next(
+            u["id"] for u in resp.json() if u["email"] == "member@test.com"
+        )
+        client.patch(
+            f"/users/{member_id}",
+            json={"is_active": False},
+            headers=_auth(admin_token),
+        )
+        resp = client.post("/auth/refresh")
+        assert resp.status_code == 401
+
+    def test_logout_clears_cookie_and_revokes(self, client: TestClient) -> None:
+        client.post(
+            "/auth/login", json={"email": "admin@test.com", "password": "adminpass"}
+        )
+        resp = client.post("/auth/logout")
+        assert resp.status_code == 200
+        assert client.cookies.get("refresh_token") is None
+
+        # The revoked cookie value (captured before logout cleared the jar)
+        # can no longer refresh.
+        resp2 = client.post("/auth/refresh")
+        assert resp2.status_code == 401
 
 
 class TestUserManagement:

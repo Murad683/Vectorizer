@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.core.auth.models import Role
 from app.core.auth.security import hash_password
-from app.core.auth.store import UserStore
+from app.core.auth.store import RefreshTokenStore, UserStore
 from app.core.queue.models import JobStatus
 from app.core.queue.store import JobStore
 from app.main import create_app
@@ -26,13 +26,15 @@ async def _noop_lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 @pytest.fixture()
-def _stores(job_store: JobStore, user_store: UserStore):
-    return job_store, user_store
+def _stores(
+    job_store: JobStore, user_store: UserStore, refresh_token_store: RefreshTokenStore
+):
+    return job_store, user_store, refresh_token_store
 
 
 @pytest.fixture()
 def client(_stores, tmp_path: Path) -> TestClient:
-    job_store, user_store = _stores
+    job_store, user_store, refresh_token_store = _stores
     admin_id = uuid4()
     user_store.create_user(
         user_id=admin_id,
@@ -44,6 +46,7 @@ def client(_stores, tmp_path: Path) -> TestClient:
     app.router.lifespan_context = _noop_lifespan
     app.state.job_store = job_store
     app.state.user_store = user_store
+    app.state.refresh_token_store = refresh_token_store
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
@@ -105,6 +108,51 @@ class TestUploadValidation:
             files={"file": ("test.docx", b"hello", "application/octet-stream")},
         )
         assert resp.status_code == 401
+
+    def test_png_upload_accepted(
+        self, client: TestClient, flowchart_png_bytes: bytes
+    ) -> None:
+        token = _login(client)
+        resp = client.post(
+            "/jobs",
+            files={"file": ("photo.png", flowchart_png_bytes, "image/png")},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "pending"
+
+    def test_jpeg_upload_accepted(
+        self, client: TestClient, flowchart_png_bytes: bytes
+    ) -> None:
+        token = _login(client)
+        resp = client.post(
+            "/jobs",
+            # Real bytes needn't be true JPEG-encoded for this endpoint —
+            # it's an extension-based check, matching the existing PDF/DOCX
+            # behavior (no content sniffing at upload time; see the
+            # ImageExtractor tests for the actual-content validation,
+            # which runs during background processing instead).
+            files={"file": ("photo.jpg", flowchart_png_bytes, "image/jpeg")},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "pending"
+
+    def test_oversized_image_rejected(
+        self, client: TestClient, flowchart_png_bytes: bytes
+    ) -> None:
+        token = _login(client)
+        with patch("app.api.routes.jobs.get_settings") as mock_settings:
+            settings = MagicMock()
+            settings.max_upload_size_mb = 0
+            mock_settings.return_value = settings
+            resp = client.post(
+                "/jobs",
+                files={"file": ("photo.png", flowchart_png_bytes, "image/png")},
+                headers=_auth(token),
+            )
+        assert resp.status_code == 413
+        assert resp.json()["error_code"] == "file_too_large"
 
 
 class TestJobLifecycle:
@@ -205,6 +253,117 @@ class TestJobLifecycle:
         assert "wordprocessingml" in resp.headers["content-type"]
         zf = zipfile.ZipFile(io.BytesIO(resp.content))
         assert "word/document.xml" in zf.namelist()
+
+
+class TestJobListPagination:
+    def _upload(
+        self, client: TestClient, token: str, filename: str, content: bytes
+    ) -> str:
+        resp = client.post(
+            "/jobs",
+            files={"file": (filename, content, "application/octet-stream")},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 201
+        return resp.json()["job_id"]  # type: ignore[no-any-return]
+
+    def test_list_default_shape(self, client: TestClient, sample_bytes: bytes) -> None:
+        token = _login(client)
+        self._upload(client, token, "a.docx", sample_bytes)
+        resp = client.get("/jobs", headers=_auth(token))
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "items" in body and "total" in body
+        assert body["total"] == 1
+        assert len(body["items"]) == 1
+
+    def test_pagination_boundaries(
+        self, client: TestClient, sample_bytes: bytes
+    ) -> None:
+        token = _login(client)
+        for i in range(5):
+            self._upload(client, token, f"file{i}.docx", sample_bytes)
+
+        resp = client.get("/jobs?limit=2&offset=0", headers=_auth(token))
+        body = resp.json()
+        assert body["total"] == 5
+        assert len(body["items"]) == 2
+
+        resp = client.get("/jobs?limit=2&offset=4", headers=_auth(token))
+        body = resp.json()
+        assert len(body["items"]) == 1  # only one left at the tail
+
+        resp = client.get("/jobs?limit=2&offset=10", headers=_auth(token))
+        body = resp.json()
+        assert body["items"] == []
+        assert body["total"] == 5
+
+    def test_limit_capped_at_max(self, client: TestClient, sample_bytes: bytes) -> None:
+        token = _login(client)
+        self._upload(client, token, "a.docx", sample_bytes)
+        resp = client.get("/jobs?limit=99999", headers=_auth(token))
+        assert resp.status_code == 200  # doesn't error, just capped server-side
+
+    def test_search_matches_filename_case_insensitive(
+        self, client: TestClient, sample_bytes: bytes
+    ) -> None:
+        token = _login(client)
+        self._upload(client, token, "Informatika_Test.docx", sample_bytes)
+        self._upload(client, token, "Riyaziyyat.docx", sample_bytes)
+
+        resp = client.get("/jobs?search=informatika", headers=_auth(token))
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["items"][0]["input_filename"] == "Informatika_Test.docx"
+
+    def test_search_no_match_returns_empty(
+        self, client: TestClient, sample_bytes: bytes
+    ) -> None:
+        token = _login(client)
+        self._upload(client, token, "a.docx", sample_bytes)
+        resp = client.get("/jobs?search=nonexistent", headers=_auth(token))
+        body = resp.json()
+        assert body["total"] == 0
+        assert body["items"] == []
+
+    def test_search_combined_with_pagination(
+        self, client: TestClient, sample_bytes: bytes
+    ) -> None:
+        token = _login(client)
+        for i in range(3):
+            self._upload(client, token, f"aligned_{i}.docx", sample_bytes)
+        self._upload(client, token, "other.docx", sample_bytes)
+
+        resp = client.get("/jobs?search=aligned&limit=2&offset=0", headers=_auth(token))
+        body = resp.json()
+        assert body["total"] == 3
+        assert len(body["items"]) == 2
+
+        resp = client.get("/jobs?search=aligned&limit=2&offset=2", headers=_auth(token))
+        body = resp.json()
+        assert len(body["items"]) == 1
+
+    def test_ownership_scoping_respected_under_search(
+        self, client: TestClient, sample_bytes: bytes
+    ) -> None:
+        admin_token = _login(client)
+        client.post(
+            "/users",
+            json={"email": "member@test.com", "password": "memberpass"},
+            headers=_auth(admin_token),
+        )
+        member_token = _login(client, "member@test.com", "memberpass")
+
+        self._upload(client, admin_token, "shared_name.docx", sample_bytes)
+        self._upload(client, member_token, "shared_name.docx", sample_bytes)
+
+        resp = client.get("/jobs?search=shared", headers=_auth(member_token))
+        body = resp.json()
+        assert body["total"] == 1  # member sees only their own match
+
+        resp = client.get("/jobs?search=shared", headers=_auth(admin_token))
+        body = resp.json()
+        assert body["total"] == 2  # admin sees both
 
 
 class TestJobDeletion:

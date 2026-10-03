@@ -118,6 +118,8 @@ def _add_vision_element(
 
     graph = result.diagram_graph
     if graph is not None and graph.edges:
+        if graph.title:
+            document.add_paragraph().add_run(graph.title)
         layouted = layout_graph(graph)
         add_diagram_to_docx(
             layouted,

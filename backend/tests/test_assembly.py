@@ -11,8 +11,14 @@ from pptx.util import Emu
 from app.core.assembly import assemble_docx, assemble_pptx
 from app.core.classifier import classify_elements
 from app.core.ingestion.docx_extractor import DocxExtractor
+from app.core.ingestion.image_extractor import ImageExtractor
 from app.models.diagram import DiagramGraph
-from app.models.document import ClassifiedElement, ContentType, VisionResult
+from app.models.document import (
+    ClassifiedElement,
+    ContentType,
+    ElementType,
+    VisionResult,
+)
 from app.models.text_content import LabeledList, TextContent, TextLine, TextRun
 
 _NS = {
@@ -97,6 +103,24 @@ def mock_vision_with_text(
                 text_content=_q87_text_content(),
             )
         return VisionResult(error="unrecognised image (mock)")
+
+    provider = MagicMock()
+    provider.analyze_diagram.side_effect = analyze
+    return provider
+
+
+@pytest.fixture()
+def mock_vision_with_title(flowchart_graph: DiagramGraph) -> MagicMock:
+    """Vision that solves the real flowchart AND reports a title line
+    positioned above the flowchart itself (Bug 1)."""
+    graph_with_title = flowchart_graph.model_copy(
+        update={"title": "Blok-sxem nəyi hesablayır?"}
+    )
+
+    def analyze(image: bytes, context: str | None = None) -> VisionResult:
+        return VisionResult(
+            content_type=ContentType.DIAGRAM, diagram_graph=graph_with_title
+        )
 
     provider = MagicMock()
     provider.analyze_diagram.side_effect = analyze
@@ -375,6 +399,127 @@ class TestTextContentAssembly:
             ".//{http://schemas.openxmlformats.org/drawingml/2006/picture}pic"
         )
         assert len(pics) == 1
+
+
+class TestImageOnlyAssembly:
+    """A standalone PNG/JPEG upload (Phase 15) — same assembly pipeline as
+    PDF/DOCX, just a single IMAGE element as the whole "document"."""
+
+    @pytest.fixture()
+    def image_classified(
+        self, flowchart_png_bytes: bytes, tmp_path: Path
+    ) -> list[ClassifiedElement]:
+        image_path = tmp_path / "photo.png"
+        image_path.write_bytes(flowchart_png_bytes)
+        return classify_elements(ImageExtractor().extract(image_path))
+
+    def test_classified_as_diagram(
+        self, image_classified: list[ClassifiedElement]
+    ) -> None:
+        assert len(image_classified) == 1
+        assert image_classified[0].element_type == ElementType.DIAGRAM
+
+    def test_docx_output_is_structurally_valid(
+        self,
+        image_classified: list[ClassifiedElement],
+        mock_vision: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        document = assemble_docx(image_classified, vision_provider=mock_vision)
+        path = tmp_path / "image_only.docx"
+        document.save(str(path))
+        _parse_package(path)  # every XML part parses
+
+        # The mocked vision call solves the real flowchart, so it renders
+        # as native shapes (a canvas), not an embedded-picture fallback.
+        canvases = document.element.body.findall(f".//{{{_NS['wpc']}}}wpc")
+        assert len(canvases) == 1
+
+    def test_pptx_output_is_structurally_valid(
+        self,
+        image_classified: list[ClassifiedElement],
+        mock_vision: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        prs = assemble_pptx(image_classified, vision_provider=mock_vision)
+        path = tmp_path / "image_only.pptx"
+        prs.save(str(path))
+        _parse_package(path)  # every XML part parses
+
+        slides = list(prs.slides)
+        assert len(slides) >= 1
+        all_text = [
+            shape.text_frame.text
+            for slide in slides
+            for shape in slide.shapes
+            if shape.has_text_frame
+        ]
+        assert any("Başlanğıc" in t for t in all_text)  # diagram shape text
+
+    def test_docx_title_appears_before_the_diagram(
+        self,
+        image_classified: list[ClassifiedElement],
+        mock_vision_with_title: MagicMock,
+    ) -> None:
+        """Bug 1: a title line above the flowchart itself must not be
+        silently dropped — it should appear as its own paragraph right
+        before the diagram canvas."""
+        document = assemble_docx(
+            image_classified, vision_provider=mock_vision_with_title
+        )
+        body = document.element.body
+        texts_or_canvas = []
+        for child in body:
+            if child.tag == f"{{{_NS['w']}}}p":
+                if child.findall(f".//{{{_NS['wpc']}}}wpc"):
+                    texts_or_canvas.append("<canvas>")
+                else:
+                    text = "".join(
+                        t.text or "" for t in child.findall(f".//{{{_NS['w']}}}t")
+                    )
+                    texts_or_canvas.append(text)
+        assert "Blok-sxem nəyi hesablayır?" in texts_or_canvas
+        title_idx = texts_or_canvas.index("Blok-sxem nəyi hesablayır?")
+        assert texts_or_canvas[title_idx + 1] == "<canvas>"
+
+    def test_docx_no_title_means_no_stray_paragraph(
+        self,
+        image_classified: list[ClassifiedElement],
+        mock_vision: MagicMock,
+    ) -> None:
+        document = assemble_docx(image_classified, vision_provider=mock_vision)
+        all_text = [p.text for p in document.paragraphs]
+        assert "Blok-sxem nəyi hesablayır?" not in all_text
+
+    def test_pptx_title_appears_on_the_diagram_slide(
+        self,
+        image_classified: list[ClassifiedElement],
+        mock_vision_with_title: MagicMock,
+    ) -> None:
+        """Bug 1, PPTX side: same title, rendered as a heading text box
+        on the diagram's own slide, above its shapes."""
+        prs = assemble_pptx(image_classified, vision_provider=mock_vision_with_title)
+        slides = list(prs.slides)
+        assert len(slides) >= 1
+        slide_texts = [
+            shape.text_frame.text for shape in slides[0].shapes if shape.has_text_frame
+        ]
+        assert "Blok-sxem nəyi hesablayır?" in slide_texts
+        assert any("Başlanğıc" in t for t in slide_texts)  # diagram is here too
+
+    def test_pptx_no_title_means_no_stray_textbox(
+        self,
+        image_classified: list[ClassifiedElement],
+        mock_vision: MagicMock,
+    ) -> None:
+        prs = assemble_pptx(image_classified, vision_provider=mock_vision)
+        all_text = [
+            shape.text_frame.text
+            for slide in prs.slides
+            for shape in slide.shapes
+            if shape.has_text_frame
+        ]
+        assert "Blok-sxem nəyi hesablayır?" not in all_text
 
 
 def test_subscript_runs_captured_by_extractor(sample_docx: Path) -> None:

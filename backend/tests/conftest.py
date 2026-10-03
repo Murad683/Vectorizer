@@ -9,7 +9,7 @@ import psycopg
 import pymupdf
 import pytest
 
-from app.core.auth.store import UserStore
+from app.core.auth.store import RefreshTokenStore, UserStore
 from app.core.queue.store import JobStore
 from app.models.diagram import DiagramEdge, DiagramGraph, DiagramNode, ShapeType
 
@@ -29,18 +29,28 @@ TEST_DATABASE_URL = os.environ.get(
 @pytest.fixture(scope="session", autouse=True)
 def _migrated_test_database() -> None:
     """Apply Alembic migrations to the test database once per session."""
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        cwd=BACKEND_DIR,
-        env={**os.environ, "DATABASE_URL": TEST_DATABASE_URL},
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=BACKEND_DIR,
+            env={**os.environ, "DATABASE_URL": TEST_DATABASE_URL},
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            import warnings
+            warnings.warn("Test database not available — DB tests will fail")
+    except subprocess.TimeoutExpired:
+        import warnings
+        warnings.warn("Test database not reachable — DB tests will fail")
 
 
 def _truncate_all() -> None:
-    """Wipe both tables for per-test isolation (cheap vs. a fresh DB)."""
+    """Wipe all tables for per-test isolation (cheap vs. a fresh DB)."""
     with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
-        conn.execute("TRUNCATE TABLE jobs, users RESTART IDENTITY CASCADE")
+        conn.execute(
+            "TRUNCATE TABLE jobs, users, refresh_tokens RESTART IDENTITY CASCADE"
+        )
 
 
 @pytest.fixture()
@@ -57,6 +67,20 @@ def user_store() -> UserStore:
     """A fresh UserStore against the truncated test database."""
     _truncate_all()
     store = UserStore(dsn=TEST_DATABASE_URL)
+    yield store
+    store.close()
+
+
+@pytest.fixture()
+def refresh_token_store() -> RefreshTokenStore:
+    """A fresh RefreshTokenStore against the truncated test database.
+
+    Does NOT call ``_truncate_all`` itself — tests that need this
+    alongside ``job_store``/``user_store`` should depend on whichever of
+    those already truncates, to avoid wiping data set up by an earlier
+    fixture in the same test.
+    """
+    store = RefreshTokenStore(dsn=TEST_DATABASE_URL)
     yield store
     store.close()
 
@@ -88,6 +112,41 @@ def flowchart_graph() -> DiagramGraph:
             DiagramEdge(source_id="n4", target_id="n7", label="Hə"),
             DiagramEdge(source_id="n7", target_id="n8"),
             DiagramEdge(source_id="n8", target_id="n4"),
+        ],
+    )
+
+
+@pytest.fixture(scope="session")
+def collision_graph() -> DiagramGraph:
+    """Synthetic topology reproducing the Phase 17 bug report.
+
+    Two nested decisions where one branch ("a==b" -> "d=c/a" -> "d") is
+    the same depth as the OTHER decision's two branches ("a=a-b",
+    "b=b-a") — all three land in the same layout row, with "d" placed
+    between the other two. Both "a=a-b" and "b=b-a" loop back to the
+    outer decision: the left one's back-edge must reach past "d" and
+    "b=b-a" to get to the rail, which is exactly the case the simple
+    right-rail route couldn't handle without crossing "d"'s box.
+    """
+    return DiagramGraph(
+        nodes=[
+            DiagramNode(id="n1", shape_type=ShapeType.TERMINATOR, text="Başlanğıc"),
+            DiagramNode(id="n2", shape_type=ShapeType.DECISION, text="a==b"),
+            DiagramNode(id="n4", shape_type=ShapeType.DECISION, text="a>b"),
+            DiagramNode(id="n3a", shape_type=ShapeType.PROCESS, text="d=c/a"),
+            DiagramNode(id="n3", shape_type=ShapeType.INPUT_OUTPUT, text="d"),
+            DiagramNode(id="n5", shape_type=ShapeType.PROCESS, text="a=a-b"),
+            DiagramNode(id="n6", shape_type=ShapeType.PROCESS, text="b=b-a"),
+        ],
+        edges=[
+            DiagramEdge(source_id="n1", target_id="n2"),
+            DiagramEdge(source_id="n2", target_id="n4", label="Yox"),
+            DiagramEdge(source_id="n2", target_id="n3a", label="Hə"),
+            DiagramEdge(source_id="n3a", target_id="n3"),
+            DiagramEdge(source_id="n4", target_id="n5", label="Hə"),
+            DiagramEdge(source_id="n4", target_id="n6", label="Yox"),
+            DiagramEdge(source_id="n5", target_id="n2"),
+            DiagramEdge(source_id="n6", target_id="n2"),
         ],
     )
 

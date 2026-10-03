@@ -17,7 +17,7 @@ from app.config import get_settings
 from app.core.auth.dependencies import _AuthError
 from app.core.auth.models import Role
 from app.core.auth.security import hash_password
-from app.core.auth.store import UserStore
+from app.core.auth.store import RefreshTokenStore, UserStore
 from app.core.queue.store import JobStore
 from app.core.queue.worker import start_worker
 from app.logging_config import configure_logging
@@ -54,15 +54,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     job_store = JobStore(dsn=settings.database_url)
     user_store = UserStore(dsn=settings.database_url)
+    refresh_token_store = RefreshTokenStore(dsn=settings.database_url)
     _bootstrap_admin(user_store)
 
     app.state.job_store = job_store
     app.state.user_store = user_store
+    app.state.refresh_token_store = refresh_token_store
     worker_task = await start_worker(job_store)
     yield
     worker_task.cancel()
     job_store.close()
     user_store.close()
+    refresh_token_store.close()
 
 
 def create_app() -> FastAPI:

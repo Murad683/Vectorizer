@@ -2,6 +2,9 @@ const BASE = '/api';
 
 let _token: string | null = null;
 let _onUnauthorized: (() => void) | null = null;
+// Coalesces concurrent 401s into a single /auth/refresh call instead of
+// firing one refresh attempt per in-flight request.
+let _refreshPromise: Promise<boolean> | null = null;
 
 export function setToken(token: string | null) {
   _token = token;
@@ -11,7 +14,35 @@ export function setOnUnauthorized(cb: () => void) {
   _onUnauthorized = cb;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** Silently exchange the httpOnly refresh cookie for a new access token. */
+export async function bootstrapAuth(): Promise<string | null> {
+  const ok = await refreshAccessToken();
+  return ok ? _token : null;
+}
+
+function refreshAccessToken(): Promise<boolean> {
+  if (!_refreshPromise) {
+    _refreshPromise = (async () => {
+      try {
+        const res = await fetch(`${BASE}/auth/refresh`, {
+          method: 'POST',
+          credentials: 'include',
+        });
+        if (!res.ok) return false;
+        const body: LoginResponse = await res.json();
+        _token = body.access_token;
+        return true;
+      } catch {
+        return false;
+      } finally {
+        _refreshPromise = null;
+      }
+    })();
+  }
+  return _refreshPromise;
+}
+
+async function request<T>(path: string, init: RequestInit = {}, _retried = false): Promise<T> {
   const headers = new Headers(init.headers);
   if (_token) {
     headers.set('Authorization', `Bearer ${_token}`);
@@ -20,9 +51,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set('Content-Type', 'application/json');
   }
 
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  const res = await fetch(`${BASE}${path}`, { ...init, headers, credentials: 'include' });
 
   if (res.status === 401) {
+    const isAuthEndpoint = path.startsWith('/auth/');
+    if (!_retried && !isAuthEndpoint) {
+      const refreshed = await refreshAccessToken();
+      if (refreshed) {
+        return request<T>(path, init, true);
+      }
+    }
     _onUnauthorized?.();
     throw new ApiError('not_authenticated', 'Sessiya bitib. Yenidən daxil olun.', 401);
   }
@@ -77,6 +115,11 @@ export interface UserResponse {
   job_count: number;
 }
 
+export interface JobListPage {
+  items: JobResponse[];
+  total: number;
+}
+
 export const api = {
   login(email: string, password: string) {
     return request<LoginResponse>('/auth/login', {
@@ -85,8 +128,17 @@ export const api = {
     });
   },
 
-  listJobs() {
-    return request<JobResponse[]>('/jobs');
+  logout() {
+    return request<{ ok: boolean }>('/auth/logout', { method: 'POST' });
+  },
+
+  listJobs(params: { limit?: number; offset?: number; search?: string } = {}) {
+    const qs = new URLSearchParams();
+    if (params.limit !== undefined) qs.set('limit', String(params.limit));
+    if (params.offset !== undefined) qs.set('offset', String(params.offset));
+    if (params.search) qs.set('search', params.search);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<JobListPage>(`/jobs${suffix}`);
   },
 
   getJob(id: string) {

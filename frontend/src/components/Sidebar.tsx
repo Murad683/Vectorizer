@@ -1,14 +1,27 @@
 import { useState } from 'react';
 import type { JobResponse } from '../api/client';
-import { STATUS_LABELS, formatRelativeTime } from '../lib/jobUtils';
+import { STATUS_LABELS, formatRelativeTime, groupJobsByRecency } from '../lib/jobUtils';
 import { StatusDot } from './StatusBadge';
 
 interface Props {
   jobs: JobResponse[];
+  total: number;
   selectedJobId: string | null;
   onSelect: (jobId: string) => void;
   onNewUpload: () => void;
   onDelete: (jobId: string) => void;
+  onViewAll: () => void;
+  /** Whether the sidebar is visible — a manual toggle, not tied to
+      viewport size, so desktop users can hide it too. */
+  open: boolean;
+  onClose: () => void;
+}
+
+/** Below the `md` breakpoint the sidebar is an overlay drawer — picking
+    an item should close it so the selection is actually visible. */
+const MOBILE_BREAKPOINT_PX = 768;
+function isMobileViewport() {
+  return window.innerWidth < MOBILE_BREAKPOINT_PX;
 }
 
 function SidebarEntry({
@@ -81,43 +94,115 @@ function SidebarEntry({
   );
 }
 
-export default function Sidebar({ jobs, selectedJobId, onSelect, onNewUpload, onDelete }: Props) {
-  return (
-    <aside className="w-72 shrink-0 bg-sidebar border-r border-border flex flex-col h-full">
-      <div className="p-3 border-b border-border">
-        <button
-          onClick={onNewUpload}
-          className="w-full flex items-center gap-2 text-sm font-medium text-ink-secondary border border-border rounded-lg px-3 py-2 hover:bg-surface-hover hover:border-border-strong transition-colors cursor-pointer"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-          </svg>
-          Yeni yükləmə
-        </button>
-      </div>
+export default function Sidebar({
+  jobs,
+  total,
+  selectedJobId,
+  onSelect,
+  onNewUpload,
+  onDelete,
+  onViewAll,
+  open,
+  onClose,
+}: Props) {
+  // On mobile the sidebar is a full overlay drawer — once the user has
+  // picked an action, close it so the result (new upload zone, selected
+  // job, history page) is actually visible underneath.
+  function closeIfMobile() {
+    if (isMobileViewport()) onClose();
+  }
 
-      <div className="flex-1 overflow-y-auto divide-y divide-border/60">
-        {jobs.length === 0 ? (
-          <div className="text-center px-4 py-12">
-            <div className="relative w-10 h-10 mx-auto mb-3">
-              <div className="vectorize-shape absolute inset-0 bg-border-strong" />
+  return (
+    <>
+      {/* Backdrop — mobile-only (md:hidden); desktop hide/show never dims
+          the main panel, it just reclaims the width. */}
+      {open && (
+        <div
+          className="fixed inset-0 bg-ink/50 z-30 md:hidden"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
+
+      <aside
+        className={`
+          fixed md:static inset-y-0 left-0 z-40 h-full w-72 max-w-[85vw] shrink-0
+          bg-sidebar border-r border-border flex flex-col overflow-hidden
+          transform transition-transform duration-200 ease-in-out
+          md:translate-x-0 md:transition-[width,border-color]
+          ${open ? 'translate-x-0' : '-translate-x-full'}
+          ${!open ? 'md:w-0 md:border-r-0' : ''}
+        `}
+      >
+        <div className="p-3 border-b border-border flex items-center gap-2 shrink-0">
+          {/* Secondary action — the center drag-drop area is the intended
+              focal point of the home state, so this stays quiet: muted
+              text/icon at rest, no fill, only brightening on hover. */}
+          <button
+            onClick={() => { onNewUpload(); closeIfMobile(); }}
+            className="flex-1 min-w-0 flex items-center gap-2 text-sm font-medium text-muted border border-border rounded-lg px-3 py-2 hover:text-ink-secondary hover:bg-surface-hover hover:border-border-strong transition-colors cursor-pointer"
+          >
+            <svg className="w-4 h-4 text-accent/70 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+            <span className="truncate">Yeni yükləmə</span>
+          </button>
+
+          <button
+            onClick={onClose}
+            title="Bağla"
+            aria-label="Sidebar-ı bağla"
+            className="md:hidden shrink-0 p-2 rounded-lg text-muted hover:text-ink-secondary hover:bg-surface-hover transition-colors cursor-pointer"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="no-scrollbar flex-1 overflow-y-auto">
+          {jobs.length === 0 ? (
+            <div className="text-center px-4 py-12">
+              <div className="relative w-10 h-10 mx-auto mb-3">
+                <div className="vectorize-shape absolute inset-0 bg-border-strong" />
+              </div>
+              <p className="text-xs text-muted leading-relaxed">
+                Yükləmələriniz burada görünəcək — başlamaq üçün "Yeni yükləmə" düyməsini basın
+              </p>
             </div>
-            <p className="text-xs text-muted leading-relaxed">
-              Yükləmələriniz burada görünəcək — başlamaq üçün "Yeni yükləmə" düyməsini basın
-            </p>
+          ) : (
+            groupJobsByRecency(jobs).map(group => (
+              <div key={group.label}>
+                <p className="px-4 pt-4 pb-1.5 text-[11px] font-medium text-muted uppercase tracking-wider">
+                  {group.label}
+                </p>
+                <div className="divide-y divide-border/60">
+                  {group.jobs.map(job => (
+                    <SidebarEntry
+                      key={job.job_id}
+                      job={job}
+                      isSelected={job.job_id === selectedJobId}
+                      onSelect={() => { onSelect(job.job_id); closeIfMobile(); }}
+                      onDelete={() => onDelete(job.job_id)}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {total > jobs.length && (
+          <div className="p-3 border-t border-border shrink-0">
+            <button
+              onClick={() => { onViewAll(); closeIfMobile(); }}
+              className="w-full text-center text-xs font-medium text-muted hover:text-ink-secondary transition-colors cursor-pointer py-1.5"
+            >
+              Hamısına bax ({total})
+            </button>
           </div>
-        ) : (
-          jobs.map(job => (
-            <SidebarEntry
-              key={job.job_id}
-              job={job}
-              isSelected={job.job_id === selectedJobId}
-              onSelect={() => onSelect(job.job_id)}
-              onDelete={() => onDelete(job.job_id)}
-            />
-          ))
         )}
-      </div>
-    </aside>
+      </aside>
+    </>
   );
 }

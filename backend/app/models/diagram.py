@@ -20,6 +20,15 @@ class ShapeType(str, Enum):
     INPUT_OUTPUT = "input_output"  # parallelogram — input / print
 
 
+class PortSide(str, Enum):
+    """Which side of a node an edge exits from."""
+
+    TOP = "top"
+    BOTTOM = "bottom"
+    LEFT = "left"
+    RIGHT = "right"
+
+
 class DiagramNode(BaseModel):
     """One flowchart symbol, as identified by the vision model."""
 
@@ -38,11 +47,35 @@ class DiagramEdge(BaseModel):
     label: str | None = Field(
         default=None, description="Branch label, e.g. 'Hə' or 'Yox'."
     )
+    source_port: PortSide | None = Field(
+        default=None,
+        description=(
+            "Which side of the source node this edge exits from. "
+            "Set by vision for decision-node branches; None = let layout decide."
+        ),
+    )
     is_back_edge: bool = Field(
         default=False,
         description=(
             "Set by the layout engine when the target sits above the source "
             "(a loop). Renderers must route these around the main column."
+        ),
+    )
+    label_x: float | None = Field(
+        default=None,
+        description="Label center x in layout px, set by the layout engine.",
+    )
+    label_y: float | None = Field(
+        default=None,
+        description="Label top y in layout px, set by the layout engine.",
+    )
+    edge_path: list[list[float]] | None = Field(
+        default=None,
+        description=(
+            "Ordered waypoints [[x,y], ...] in layout px extracted from "
+            "Graphviz's ortho edge routing. Includes start, bend points, "
+            "and end. Set by the layout engine; consumed by renderers to "
+            "choose OOXML connector presets and compute adjustment values."
         ),
     )
 
@@ -52,6 +85,15 @@ class DiagramGraph(BaseModel):
 
     nodes: list[DiagramNode]
     edges: list[DiagramEdge]
+    title: str | None = Field(
+        default=None,
+        description=(
+            "A heading/title line positioned above the flowchart itself in "
+            "the source image, if any (e.g. 'Blok-sxem nəyi hesablayır?') — "
+            "distinct from any node's own label. None when the image has no "
+            "such line."
+        ),
+    )
 
 
 class LayoutedNode(DiagramNode):

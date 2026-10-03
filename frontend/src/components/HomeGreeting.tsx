@@ -5,8 +5,8 @@ export default function HomeGreeting() {
         Bugün nəyi vektorlaşdıraq?
       </h1>
       <p className="text-sm text-muted">
-        PDF və ya DOCX faylını sürükləyin, pikselli sxemləri və cədvəlləri təmiz,
-        redaktə edilə bilən nəticəyə çeviririk.
+        PDF, DOCX faylını və ya şəkli sürükləyin, pikselli sxemləri və cədvəlləri
+        təmiz, redaktə edilə bilən nəticəyə çeviririk.
       </p>
     </div>
   );

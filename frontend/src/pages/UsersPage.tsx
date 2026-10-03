@@ -26,7 +26,7 @@ function UserRow({
       : undefined;
 
   return (
-    <div className="py-3.5 flex items-center justify-between first:pt-0 last:pb-0 gap-3">
+    <div className="py-3.5 flex flex-wrap items-center justify-between first:pt-0 last:pb-0 gap-2 sm:gap-3">
       <div className="min-w-0">
         <p className="text-sm text-ink truncate">{u.email}</p>
         <p className="text-xs text-muted mt-0.5">

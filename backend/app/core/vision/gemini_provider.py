@@ -34,7 +34,7 @@ Set "content_type" to:
 - "text_content" — textual content with NO flow arrows, e.g. a matching \
 question made of two labeled lists (a numbered list and a lettered list).
 
-If content_type is "diagram", fill "diagram" with {nodes, edges}:
+If content_type is "diagram", fill "diagram" with {nodes, edges, title}:
 - One node per flowchart symbol. shape_type is one of:
   "terminator" (oval/stadium, e.g. Başlanğıc / Son),
   "process" (rectangle, e.g. assignments),
@@ -43,8 +43,17 @@ If content_type is "diagram", fill "diagram" with {nodes, edges}:
 - "text" is the label EXACTLY as written, in Azerbaijani. Do not translate.
 - One edge per arrow, in the arrow's direction. Branch labels on arrows \
 (e.g. "Hə", "Yox") go in that edge's "label"; null when the arrow has none.
+- For edges leaving a DECISION (diamond) node: set "source_port" to the \
+side the arrow exits from in the image — "left", "right", "bottom", or \
+"top". Look at the image carefully. Leave it null for non-decision nodes \
+or when unsure.
 - Node ids "n1", "n2", ... in reading order. Include loop-back arrows.
 - A flowchart always has arrows, so "edges" must not be empty.
+- "title" is a heading/question line positioned ABOVE the flowchart itself \
+(e.g. "Blok-sxem nəyi hesablayır?" or "Problem 2: ..."), if the image has \
+one. This is NOT any node's own label — it sits outside the flowchart's \
+boxes/arrows entirely. Preserve it EXACTLY. Leave it null if the image has \
+no such line — never invent a title that isn't actually in the image.
 Leave "text_content" null in this case.
 
 If content_type is "text_content", fill "text_content" with {heading, lists}:

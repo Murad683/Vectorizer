@@ -2,8 +2,11 @@
 
 from pathlib import Path
 
+import pytest
+
 from app.core.ingestion import get_extractor
 from app.core.ingestion.docx_extractor import DocxExtractor
+from app.core.ingestion.image_extractor import ImageExtractor
 from app.core.ingestion.pdf_extractor import PdfExtractor
 from app.models.document import ElementKind
 
@@ -78,9 +81,60 @@ class TestPdfExtractor:
         assert all(e.source_page == 1 for e in elements)
 
 
+class TestImageExtractor:
+    def test_valid_png_extracted_as_single_image_element(
+        self, flowchart_png_bytes: bytes, tmp_path: Path
+    ) -> None:
+        image_path = tmp_path / "photo.png"
+        image_path.write_bytes(flowchart_png_bytes)
+
+        elements = ImageExtractor().extract(image_path)
+
+        assert len(elements) == 1
+        element = elements[0]
+        assert element.element_kind == ElementKind.IMAGE
+        assert element.source_page == 1
+        assert element.raw_content == flowchart_png_bytes
+        assert element.metadata["image_ext"] == "png"
+
+    def test_jpeg_extension_sets_jpeg_image_ext(
+        self, flowchart_png_bytes: bytes, tmp_path: Path
+    ) -> None:
+        # Real bytes don't need to actually be JPEG-encoded for this
+        # extractor (Pillow's format sniffing still accepts a PNG payload
+        # under a mismatched name) — this only checks the extension →
+        # metadata mapping used downstream by the vision call.
+        image_path = tmp_path / "photo.jpg"
+        image_path.write_bytes(flowchart_png_bytes)
+
+        elements = ImageExtractor().extract(image_path)
+
+        assert elements[0].metadata["image_ext"] == "jpeg"
+
+    def test_corrupt_file_rejected(self, tmp_path: Path) -> None:
+        image_path = tmp_path / "broken.png"
+        image_path.write_bytes(b"this is not an image, just some bytes")
+
+        with pytest.raises(ValueError, match="Not a valid image file"):
+            ImageExtractor().extract(image_path)
+
+    def test_spoofed_extension_rejected(
+        self, sample_docx: Path, tmp_path: Path
+    ) -> None:
+        """A real DOCX renamed to .png — extension lies about content."""
+        image_path = tmp_path / "spoofed.png"
+        image_path.write_bytes(sample_docx.read_bytes())
+
+        with pytest.raises(ValueError, match="Not a valid image file"):
+            ImageExtractor().extract(image_path)
+
+
 def test_get_extractor_dispatches_by_extension() -> None:
     assert isinstance(get_extractor(Path("x.pdf")), PdfExtractor)
     assert isinstance(get_extractor(Path("x.DOCX")), DocxExtractor)
+    assert isinstance(get_extractor(Path("x.png")), ImageExtractor)
+    assert isinstance(get_extractor(Path("x.jpg")), ImageExtractor)
+    assert isinstance(get_extractor(Path("x.JPEG")), ImageExtractor)
 
 
 def test_get_extractor_rejects_unknown_extension() -> None:

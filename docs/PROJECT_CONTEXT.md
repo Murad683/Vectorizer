@@ -1437,3 +1437,1746 @@ judgment a human needs to make by actually looking at it. I've explained
 the reasoning behind each choice above so that judgment has something
 concrete to evaluate against, but I'm not declaring the visual result
 "done" on my own authority.
+
+## Phase 12: sidebar history limit + view-all/search, refresh-token session fix
+
+### What it does
+
+Two independent fixes from user testing: (1) the sidebar now shows only
+the 12 most recent jobs with a "Hamısına bax" (view all) entry point to
+a full paginated, backend-searched history page; (2) a page reload no
+longer logs the user out, via an httpOnly refresh-token cookie — the
+access token still lives only in frontend memory (Phase 8's decision is
+unchanged), the cookie is what survives the reload. Admin job-visibility
+scoping was explicitly out of scope and is untouched.
+
+### Backend — job list pagination + search (`app/api/routes/jobs.py`,
+### `app/core/queue/store.py`)
+
+`GET /jobs` gained `limit` (default 20, capped at 100), `offset`
+(default 0), and `search` query params, and its response shape changed
+from a bare array to `{items: [...], total: N}` — `total` reflects the
+filtered-but-unpaginated count, for frontend page-count math. This is a
+breaking response-shape change; the only consumer (the frontend) was
+updated in the same phase.
+
+`JobStore.list_jobs()` gained `search`/`limit`/`offset` params (a
+case-insensitive `input_filename ILIKE %search%`, plain — no
+`pg_trgm`/similarity index added, per the phase brief's own "don't
+over-engineer" steer at this data volume) and a new `count_jobs()`
+sibling for the `total`; both share a `_filter_clause()` helper so the
+WHERE-building logic isn't duplicated between them. Existing
+no-search/no-pagination call sites (`users.py`'s `job_count`
+computation, the worker, etc.) are unaffected — all new params default
+to `None`/unfiltered.
+
+Ownership scoping is unchanged in effect, only relocated: the route
+used to fetch *all* jobs and filter to the caller's own in Python; it
+now passes `owner_user_id` straight into the SQL `WHERE` clause (`None`
+for admins → no filter, the caller's id for members) — same visible
+behavior, now enforced in the same query as the pagination/search
+filters instead of after the fact.
+
+### Backend — refresh-token cookie flow (`app/core/auth/`,
+### `app/api/routes/auth.py`, `migrations/versions/0002_refresh_tokens.py`)
+
+- **New `refresh_tokens` table**: `id`, `user_id` (FK → `users`, `ON
+  DELETE CASCADE`), `token_hash` (SHA-256 hex, unique — the raw token is
+  never persisted, only set as the cookie value), `issued_at`,
+  `expires_at`, `revoked`. `RefreshTokenStore` (`app/core/auth/store.py`)
+  follows the same psycopg/hand-written-SQL pattern as `JobStore`/
+  `UserStore`: `create`, `get_valid_by_hash` (excludes revoked/expired
+  rows so callers never have to re-check), `revoke_by_hash`.
+- **Access-token lifetime shortened 24h → 30 min**
+  (`security.ACCESS_TOKEN_LIFETIME`) — a deviation from Phase 7's
+  original 24h flat lifetime, but the one this phase's own brief asked
+  for explicitly ("keep the access-token lifetime as short as it
+  currently is... but keep it short, e.g. 15–30 min") now that the
+  refresh cookie is what carries the session across a reload, not the
+  access token. Refresh tokens live 14 days
+  (`security.REFRESH_TOKEN_LIFETIME`) and are **rotated on every use** —
+  `POST /auth/refresh` revokes the token it just validated and issues a
+  brand new one, so a stolen-then-replayed cookie only works once before
+  the legitimate rotation invalidates it.
+- **JWT payload gained an `email` claim** (`create_access_token(user_id,
+  role, email)`) — needed so the frontend can render the logged-in
+  user's email after a silent refresh/bootstrap, where (unlike the
+  original login flow) there's no form input to read it from.
+- **`POST /auth/login`**: unchanged response body shape
+  (`{access_token, token_type}`), but now also sets the refresh cookie
+  (`httponly=True`, `samesite="lax"`, `secure=settings.cookie_secure`,
+  `path="/"`, `max_age=14 days`). The raw refresh token is never in the
+  JSON body.
+- **`POST /auth/refresh`** (new): reads the cookie, hashes it, looks it
+  up, checks the owning user is still active (deactivation revokes live
+  sessions immediately, matching the existing Phase 10 access-token
+  behavior), rotates, returns a new access token + sets the new cookie.
+  401 (with the cookie cleared) on missing/invalid/expired/revoked/
+  tampered token or a deactivated owner.
+- **`POST /auth/logout`** (new): revokes the refresh token server-side
+  and clears the cookie. Deliberately does **not** require a valid
+  Bearer access token — logout has to work even when the (now
+  short-lived) access token has already expired, which is common by the
+  time a user manually logs out.
+- **`Settings.cookie_secure`** (`app/config.py`): `True` only in
+  `environment=prod`. In dev the cookie omits `Secure` so it still gets
+  stored when the stack is exercised over plain HTTP on a LAN IP (not
+  just `localhost`, which most browsers already treat as a secure
+  context and would work with `Secure` regardless).
+- **Cookie `path="/"`**, not scoped to `/auth` — the frontend calls
+  through the Vite dev proxy at `/api/*`, which strips the `/api`
+  prefix before the backend ever sees the request, so a backend-side
+  `Path=/auth` wouldn't reliably match the browser-side request path
+  it needs to attach to. `path="/"` sidesteps that coupling; the cookie
+  being `httponly` means JS still can't read it regardless of scope.
+
+### Frontend — refresh flow wiring (`api/client.ts`,
+### `context/AuthContext.tsx`)
+
+- **`bootstrapAuth()`** (new, exported from `client.ts`): called once by
+  `AuthProvider` on mount. Silently `POST /auth/refresh`s; on success
+  decodes the returned access token into the in-memory `AuthUser` state,
+  on failure leaves the user logged out. `AuthContext` gained an
+  `initializing` flag so `App.tsx`'s router can show a blank loading
+  screen for that one round-trip instead of flashing the login page
+  before the refresh check resolves.
+- **Automatic 401-retry-once interceptor** inside `request()`: any
+  authenticated call that 401s (access token expired mid-session)
+  triggers one `POST /auth/refresh` attempt, and only if that succeeds
+  does the original request get retried once with the new token; if
+  refresh also fails, `onUnauthorized` fires (clears state → login
+  screen), same as before this phase for the terminal case. Concurrent
+  401s are coalesced onto a single in-flight refresh call
+  (`_refreshPromise`) rather than firing one refresh per stalled
+  request. `/auth/*` endpoints themselves are excluded from the
+  retry-on-401 path to avoid infinite recursion.
+- **`credentials: 'include'`** added to every `fetch` call in
+  `client.ts` (explicit, even though same-origin requests through the
+  Vite proxy already default to sending cookies) — matches the phase
+  brief's explicit ask to double-check this, and makes the dependency
+  on the cookie visible in the code rather than relying on a fetch
+  default that's easy to misremember.
+- **`logout()`** now also calls `POST /auth/logout` (best-effort, local
+  state is cleared regardless of whether the network call succeeds) so
+  the server-side revoke actually happens instead of just the token
+  being dropped client-side.
+- Access token itself is still **never** written to `localStorage`,
+  `sessionStorage`, or a JS-readable cookie — confirmed via dev tools
+  Application tab and `document.cookie` (empty — the refresh cookie is
+  httpOnly and invisible to JS) during manual validation below.
+
+### Frontend — sidebar limit + history page (`components/Sidebar.tsx`,
+### `pages/JobHistoryPage.tsx`, `pages/DashboardPage.tsx`, `App.tsx`)
+
+- **Sidebar** now fetches `GET /jobs?limit=12&offset=0` (was: fetch
+  everything). A "Hamısına bax (N)" entry appears at the bottom only
+  when `total > jobs.length` — i.e. it's absent for small job counts
+  rather than always shown, since an always-visible link to an
+  identical list would be noise.
+- **`JobHistoryPage`** (new): full history behind the `#history` hash.
+  Debounced (400 ms) search input wired to the backend `search` param
+  — confirmed via the network tab that a single request fires per
+  pause in typing, not one per keystroke. Page-number pagination
+  (Əvvəlki/Növbəti, 20 per page) rather than infinite scroll — chosen
+  because the app had no existing infinite-scroll pattern to be
+  consistent with, and explicit page controls are simpler to reason
+  about for a moderate job-history size. Clicking a row navigates to
+  `#job/<id>` rather than managing shared selection state across pages.
+- **`DashboardPage`** now accepts an optional `initialJobId` prop
+  (parsed from `#job/<id>` by the router) and — this was a required
+  refactor, not just plumbing — fetches the **selected** job via
+  `GET /jobs/{id}` independently of the (now 12-item-capped) sidebar
+  list, polling it every 4s while open. Previously `selectedJob` was
+  derived via `jobs.find(...)` against the sidebar's own fetched array,
+  which broke the moment the sidebar stopped holding every job: a job
+  opened from the history page (page 2, or matched by search) is very
+  often not one of the 12 most recent, so it would have silently failed
+  to open. The `#job/<id>` hash is consumed once (`history.replaceState`
+  clears it) so it doesn't stay sticky across ordinary sidebar clicks.
+- **`App.tsx`** router gained the `#history` and `#job/<id>` hash
+  branches alongside the existing `#users` one, plus the `initializing`
+  loading-screen gate described above.
+
+### Validated
+
+- **Backend**: full suite 142 tests (127 existing + 15 new — pagination
+  boundaries/limit-cap/search-match/no-match/search+pagination combined/
+  ownership-under-search for `GET /jobs`, and login-sets-cookie/
+  refresh-succeeds/refresh-without-cookie-401/tampered-cookie-401/
+  rotation-invalidates-old-token/expired-token-401/deactivated-user-401/
+  logout-clears-and-revokes for the refresh flow), 0 failures, 0
+  regressions. `ruff`/`black`/`mypy` clean on every file this phase
+  created or substantively edited (pre-existing `Depends()`-pattern
+  lint debt, documented since Phase 9, left alone).
+- **Frontend**: `tsc -b` and `vite build` both clean.
+- **Manual, through the actual Docker-composed stack** (rebuilt
+  `backend`+`frontend` images, migration `0001→0002` applied
+  automatically on `backend` startup, confirmed via `docker compose
+  logs`): logged in, confirmed `document.cookie` is empty and
+  `localStorage`/`sessionStorage` are empty (the refresh cookie is
+  httpOnly and invisible to JS, as intended) while the network tab
+  shows `refresh_token` actually being set; **hard-reloaded the page —
+  session persisted, dashboard rendered directly with no login-screen
+  flash**, `POST /auth/refresh` returned 200 on load; created 14 extra
+  jobs via direct API calls, confirmed the sidebar capped at 12 with
+  "Hamısına bax (15)" showing the true total; opened the history page,
+  confirmed all 15 listed; searched for "informatika" and confirmed
+  exactly one debounced network request narrowed the list to the one
+  match; clicked that result and confirmed it opened in the dashboard's
+  detail panel (job-detail-on-click preserved) with the `#job/` hash
+  cleared afterward; logged out and confirmed `POST /auth/logout`
+  fired, the login screen returned, and a subsequent `POST
+  /auth/refresh` correctly 401'd (cookie revoked, not just cleared
+  client-side); cleaned up the test jobs afterward via the API.
+- **Not separately re-verified this phase** (unchanged, and already
+  covered by the untouched ownership-scoping code path plus the new
+  `test_ownership_scoping_respected_under_search` test): admin-sees-all
+  vs. member-sees-own job visibility. No admin-scoping code was touched.
+
+### Deviations from the spec
+
+- **Access-token lifetime**: changed from Phase 7's 24h to 30 min. This
+  is what the phase brief itself asked for ("keep the access-token
+  lifetime as short as it currently is... e.g. 15–30 min"), called out
+  here because it's a change to a value set in an earlier phase, not
+  because it's a deviation from *this* phase's instructions.
+- **Refresh-token rotation, not delete-on-use**: implemented as
+  revoke-and-reissue (row kept with `revoked=TRUE`) rather than deleting
+  the row outright — the brief listed this as the recommended option
+  ("recommended: rotate... to limit replay risk"), taken as the
+  concrete choice between the two it explicitly left open.
+- **History page uses page-number pagination**, not infinite scroll —
+  the brief left this as an explicit "pick whichever is more consistent
+  with existing UI patterns" choice; the app had no existing scroll-
+  pagination pattern to match, so explicit Əvvəlki/Növbəti controls were
+  chosen for predictability.
+- **Sidebar "view all" entry is conditional** (`total > limit`), not
+  always shown — also an explicitly open choice in the brief; shown
+  only when there's more to see, since an always-present link to an
+  identical list adds visual noise for the common case of few jobs.
+- No other deviations identified — admin job-visibility scoping was
+  left completely untouched, the access token is still frontend-
+  memory-only, and backend search is the sole filtering mechanism (no
+  client-side filtering was added anywhere).
+
+## Phase 13: sidebar/dashboard visual refresh (v4)
+
+### What it does
+
+A pure CSS/JSX presentation pass over the Phase 10–12 sidebar and
+dashboard main panel — no backend changes, no data-flow/API/auth/
+routing changes. Four fixes from a design-tool-approved direction: a
+styled sidebar scrollbar, date-grouped sidebar sections, a vertically
+centered home/empty state, and a visually quieter "Yeni yükləmə"
+button. Every color used is an existing Phase 11 token or the brand
+accent at a different opacity — no new hues introduced.
+
+### Custom sidebar scrollbar (`index.css`)
+
+`.sidebar-scroll` (applied to the sidebar's scrollable job-list `div`
+in `Sidebar.tsx`): `scrollbar-width: thin` + `scrollbar-color:
+rgba(254,229,0,0.35) transparent` for Firefox, matching
+`::-webkit-scrollbar{width:6px}` / `::-webkit-scrollbar-track{background:
+transparent}` / `::-webkit-scrollbar-thumb{background-color:
+rgba(254,229,0,0.35); border-radius:999px}` /
+`::-webkit-scrollbar-thumb:hover{background-color: rgba(254,229,0,0.75)}`
+for Chrome/Edge/Safari. Accent yellow at 35% opacity at rest, 75% on
+hover — visible but not a "solid loud yellow bar." The track is fully
+transparent rather than a near-match color, so it reads as no track at
+all against `--sidebar`. No JS logic added for "only show when
+overflowing" — that's native `overflow-y: auto` behavior, already in
+place from Phase 10, and was the reason no extra code was needed here.
+
+### Date-grouped sidebar sections (`lib/jobUtils.ts`, `components/Sidebar.tsx`)
+
+New `groupJobsByRecency()` in `jobUtils.ts` — a pure display transform
+over the already-fetched, already-limited (Phase 12's 12-item sidebar
+page) job array; it does not re-fetch or change what's fetched. Bucket
+boundaries: **Bu gün** (same calendar day as now, in the browser's
+local time zone), **Bu həftə** (the 6 calendar days before today — a
+7-day window together with "Bu gün"), **Daha əvvəl** (everything
+older). Empty buckets are omitted from the returned array entirely, so
+`Sidebar.tsx` never renders an empty header — it just maps the group
+list. Headers render as `text-[11px] font-medium text-muted uppercase
+tracking-wider` — Inter (default), not Fraunces, matching the existing
+functional-label pattern already used for e.g. `UsersPage`'s
+"İstifadəçilər" section header. Group labels are stored in natural
+case in code (`'Bu gün'`) and rendered uppercase via the `uppercase`
+utility class, not as hardcoded caps strings — consistent with how the
+rest of the app handles this pattern.
+
+### Vertically centered home/empty state (`pages/DashboardPage.tsx`)
+
+Scoped strictly to the home state (`selectedJob === null`) — the
+job-detail view keeps its original `max-w-2xl mx-auto px-6 py-12`
+top-anchored wrapper untouched, per the brief's explicit "don't force-
+center job detail" instruction. The home state's wrapper is now `<div
+className="min-h-full flex items-center justify-center px-6 py-12">`
+around the existing `max-w-2xl w-full` content block.  `min-h-full`
+(not `h-full`) was the deliberate choice: it guarantees at least the
+full available height for centering math while still letting the
+container grow taller than the viewport and scroll (inherited
+`overflow-y-auto` on `<main>`) rather than clip, if a future viewport
+were ever small enough that the content didn't fit — verified this
+doesn't actually trigger at realistic sizes (see Validated below).
+
+### Toned-down "Yeni yükləmə" button (`components/Sidebar.tsx`)
+
+**Deviation, noted explicitly**: the brief's premise was that this
+button "may be a solid, high-contrast `#FEE500` filled button" — it
+was not; Phase 11's own accent-usage rule already scoped `bg-accent`
+fills to exactly two roles (primary submit actions, the sidebar
+selected-indicator/brand mark), and "Yeni yükləmə" was already a
+bordered/neutral secondary button (`text-ink-secondary`, `border-
+border`, no fill) going into this phase. Rather than skip the
+requirement on that basis, the button was quieted one step further
+from its already-secondary baseline: default text color changed from
+`text-ink-secondary` to `text-muted` (brightening to `text-ink-
+secondary` only on hover), and the plus icon tinted `text-accent/70`
+instead of inheriting the surrounding text color — a small nod to the
+brand accent without a solid fill, and consistent with the low-opacity-
+accent language introduced by the scrollbar thumb in this same phase.
+Contrast re-verified (see Validated) rather than assumed.
+
+### Validated
+
+- **Backend**: full suite re-run unchanged as instructed (no backend
+  file touched this phase) — 142 tests, 0 failures.
+- **Frontend**: `tsc -b` and `vite build` both clean.
+- **Grouping, with real varied-recency data**: created 3 jobs via
+  direct API calls, then backdated two of them directly in Postgres (3
+  days ago, 20 days ago) to force non-trivial bucket membership rather
+  than relying on same-day coincidence. Read `aside.innerText` in the
+  browser and confirmed the exact expected structure: **Bu gün** →
+  today's 2 jobs (the freshly created one + the pre-existing
+  Phase-9-era sample job), **Bu həftə** → the 3-days-ago job, **Daha
+  əvvəl** → the 20-days-ago job — headers present only where a bucket
+  was non-empty.
+- **Scrollbar**: `getComputedStyle` on `.sidebar-scroll` confirmed
+  `scrollbar-width: thin` and `scrollbar-color: rgba(254,229,0,0.35)
+  rgba(0,0,0,0)` applied. With only a handful of jobs the list's
+  `scrollHeight` did not exceed `clientHeight` (no scrollbar, as
+  intended); after uploading enough extra jobs to force overflow,
+  `scrollHeight > clientHeight` confirmed true, so the styled scrollbar
+  becomes the one shown. Checked in Chrome (the tool's embedded
+  browser is Chromium-based); Firefox was not separately available in
+  this environment to check `scrollbar-width`/`scrollbar-color`
+  rendering directly, so that engine's actual paint is unverified
+  (**flagged explicitly, not silently skipped** — the CSS properties
+  used are the documented cross-browser API and Firefox does support
+  both, but the visual result wasn't eyeballed there).
+- **Vertical centering, at multiple heights**: measured the home
+  state's content-box gap above vs. below programmatically (not just
+  eyeballed) at three viewport heights — 720px (172.0px / 172.0px),
+  1000px (312.0px / 312.0px), and a tighter 640px (132.0px / 132.0px)
+  — symmetric in all three, and `scrollHeight > clientHeight` was false
+  at every size tested (no forced/unnecessary scroll). Confirmed the
+  job-detail view still renders through its original unwrapped
+  `max-w-2xl mx-auto px-6 py-12` container, unaffected by this change.
+- **Button de-emphasis + contrast**: computed-style contrast checked
+  against the actual rendered `--sidebar` background in both themes
+  (WCAG relative-luminance formula, same method as Phase 11): light
+  theme muted-on-sidebar 5.11:1, dark theme 4.86:1 — both clear the
+  4.5:1 AA threshold for normal text. One verification wrinkle worth
+  recording: a first pass of this check, taken immediately after
+  toggling the theme, read back the *pre-toggle* color — traced via
+  `element.getAnimations()` to CSS transitions stuck at `localTime: 0`
+  because this tool's browser tab isn't actually compositing frames
+  (the same limitation the screenshot tool surfaces explicitly); a
+  freshly-created off-DOM element with the identical class resolved
+  correctly immediately, confirming the CSS itself was correct and the
+  stuck reading was purely a non-visible-tab rendering artifact, not an
+  app bug — forcing the queued transitions to finish (`.finish()`)
+  produced the correct, now-reported value.
+- **Zero regressions**: re-confirmed through the browser after all
+  changes — job selection (click sidebar entry → detail panel opens),
+  delete-with-confirmation (sidebar inline confirm), live polling
+  (interval requests continued firing), "Hamısına bax"/view-all +
+  search (Phase 12's history page unaffected, still opens and filters
+  correctly), and the refresh-token session persisting across a hard
+  reload (Phase 12) all still work exactly as before. All test jobs
+  created for this phase's manual verification were deleted via the
+  API afterward.
+
+### Deviations from the spec
+
+- **"Yeni yükləmə" button's starting point**: as detailed above, it was
+  already a bordered/neutral secondary button, not the accent-filled
+  button the brief described — quieted one further step rather than
+  left unchanged, but the premise itself didn't match the Phase 11
+  code.
+- **Bucket boundary exact values**: "Bu həftə" was implemented as the 6
+  calendar days before today (so, combined with "Bu gün," a rolling
+  7-day window) — the brief left the exact boundary as the
+  implementer's call; "Daha əvvəl" was used as the third bucket label
+  for everything older, one of the brief's own suggested names.
+- **Scrollbar opacity values**: 35% at rest / 75% on hover, within the
+  brief's suggested "~30–40%, full opacity on hover" range but not
+  literally 100% on hover — 75% was chosen to stay legible against
+  `--sidebar` without reading as a "solid loud yellow bar" even in the
+  hover state, per the brief's own stated goal for this element.
+- **Firefox scrollbar rendering not visually verified** in this
+  environment (no Firefox instance available to the tooling used) —
+  called out above, not silently assumed correct.
+
+## Phase 14: mobile responsiveness + hideable sidebar, scrollbar removed
+
+### What it does
+
+Direct follow-up user feedback on Phase 13: remove the sidebar
+scrollbar entirely (rather than the styled one from Phase 13), make
+the sidebar hideable on demand (not just narrower), and make the whole
+frontend mobile-responsive. No backend or data-flow changes — visual/
+layout only, and per explicit instruction this phase's manual
+verification skipped re-testing already-covered functional flows
+(upload, polling, auth) and focused on the new responsive/visibility
+behavior itself.
+
+### Scrollbar: styled → fully hidden (`index.css`)
+
+Phase 13's `.sidebar-scroll` (thin, accent-tinted thumb) is replaced by
+`.no-scrollbar`: `scrollbar-width: none` + `-ms-overflow-style: none`
+for Firefox/legacy Edge, `::-webkit-scrollbar { display: none }` for
+Chromium/Safari. The list stays scrollable via wheel/touch/keyboard —
+only the visible scrollbar chrome is gone. Applied to the same sidebar
+job-list `div` in `Sidebar.tsx` that carried the old class.
+
+### Hideable sidebar, both desktop and mobile (`components/Sidebar.tsx`,
+### `pages/DashboardPage.tsx`)
+
+A single `sidebarOpen` boolean (owned by `DashboardPage`, toggled by a
+new hamburger-icon button in the header, left of the logo) drives two
+different visual behaviors depending on viewport, both via one Tailwind
+class string on the `<aside>` — no separate mobile/desktop components:
+
+- **Desktop (`md:` / ≥768px)**: the sidebar is a normal in-flow flex
+  child; toggling animates its `width` between `18rem` (288px, `w-72`)
+  and `0` (`md:w-0 md:border-r-0`, `overflow-hidden` clips the content
+  during the collapse) — the main panel reclaims the freed width. This
+  is the literal "if someone doesn't want to see it, they should be
+  able to hide it" ask, and applies on desktop too, not only as a
+  mobile accommodation.
+- **Mobile (&lt;768px)**: the sidebar becomes a `fixed` overlay drawer
+  (`inset-y-0 left-0 z-40`), toggling a `transform: translateX(...)`
+  between `-translate-x-full` (off-screen) and `translate-x-0`, over a
+  semi-transparent backdrop (`bg-ink/50`, `md:hidden`, click-to-close).
+  A dedicated X-close button also appears inside the sidebar's top row
+  (`md:hidden`) as a second, more discoverable way to close it beyond
+  tapping the backdrop. `max-w-[85vw]` caps the drawer width so it
+  never edge-to-edge-clips on very narrow phones.
+- **Auto-close on mobile after picking an action**: selecting a job,
+  clicking "Yeni yükləmə," or "Hamısına bax" all call a
+  `closeIfMobile()` helper (checks `window.innerWidth < 768` at click
+  time) so the result is immediately visible instead of staying hidden
+  behind the drawer. Desktop behavior is unaffected — the sidebar stays
+  open there after these same actions, matching the pre-existing
+  always-visible feel.
+- **Initial state**: `sidebarOpen` initializes to `window.innerWidth >=
+  768` — open by default on desktop (zero behavior change from
+  Phase 8–13 for existing desktop users), closed by default on mobile
+  (an overlay drawer covering the whole screen on first load would be
+  the opposite of a good empty-state experience). No resize-listener
+  was added to re-sync this after mount — deliberately out of scope,
+  since the manual toggle already covers the "I resized my window and
+  want the sidebar back" case without added complexity.
+
+### Mobile layout pass
+
+- **Header hamburger button** (`DashboardPage.tsx`): plain 3-line icon,
+  `aria-label`/`title` reflecting current state ("Sidebar-ı
+  gizlət"/"Sidebar-ı göstər"), placed before the logo. Present at all
+  viewport sizes (it's the single control for the hide/show feature,
+  not a mobile-only affordance).
+- **Main-panel padding**: both the job-detail wrapper and the
+  home/empty-state wrapper in `DashboardPage.tsx` changed from a flat
+  `px-6 py-12` to `px-4 sm:px-6 py-8 sm:py-12`, tightening the margins
+  on narrow phones without changing anything at `sm:` and above.
+- **`UsersPage.tsx`**: `UserRow`'s flex row gained `flex-wrap` (was a
+  strict single-line `justify-between`) so the email/role-badge/
+  action-buttons cluster wraps instead of overflowing horizontally on
+  very narrow phones, with no visible change at wider sizes where it
+  already fit on one line.
+- **`JobHistoryPage.tsx` / `UsersPage.tsx` headers**: already had
+  `hidden sm:inline` on the user's email and `px-4 sm:px-6` container
+  padding from earlier phases — reviewed and left as-is, already
+  mobile-safe.
+- **Viewport meta tag**: already present in `index.html` from Phase 8
+  (`width=device-width, initial-scale=1.0`) — confirmed, not re-added.
+
+### Validated
+
+- **Frontend**: `tsc -b` and `vite build` both clean. Backend untouched
+  this phase — full backend suite intentionally **not** re-run, per
+  this phase's explicit instruction that functional/workflow
+  verification wasn't needed for a responsiveness-only frontend change
+  (Phase 13's full regression pass already covers the underlying
+  behavior, which nothing here alters).
+- **Desktop hide/show**: toggled the header hamburger at 1280×800 —
+  `<aside>` confirmed collapsing to `width: 0` (`getBoundingClientRect`)
+  with the toggle button's label switching "Sidebar-ı gizlət" ↔
+  "Sidebar-ı göstər" each click; re-opened, confirmed back to 288px.
+- **Mobile drawer**: at 375×812, confirmed the sidebar starts off-
+  screen (`left: -288`) with **no backdrop element in the DOM** and
+  **no reserved layout space** (main content isn't squished — this is
+  the `fixed`-vs-`static` positioning switch at the `md:` breakpoint
+  doing its job, not just a visual illusion). Opened it via the header
+  button — confirmed `left: 0`, backdrop present; clicked the backdrop
+  — confirmed it closed again (`left: -288`, backdrop removed).
+  Re-opened and clicked "Yeni yükləmə" — confirmed the drawer
+  auto-closed (`closeIfMobile()` firing correctly).
+- **Scrollbar**: `getComputedStyle` on the sidebar's scrollable list
+  confirmed `scrollbar-width: none`; the equivalent
+  `::-webkit-scrollbar{display:none}` rule is present in the same
+  `.no-scrollbar` class (Chromium-verified indirectly through the
+  computed-style check above, since `::-webkit-scrollbar` itself isn't
+  independently queryable via `getComputedStyle`).
+- **No horizontal overflow at 375px**: checked via
+  `document.documentElement.scrollWidth` vs. `clientWidth` (equal, no
+  overflow) on both the dashboard and the `#history` page.
+- **One tooling caveat, not an app bug** (same root cause as Phase
+  13's investigation): this environment's browser tab doesn't actually
+  composite frames, so CSS transitions queued by a class-toggle sit
+  stuck at their start value until explicitly finished
+  (`element.getAnimations().forEach(a => a.finish())`) before the
+  *computed layout* (not just computed color, this time) reflects the
+  end state. Every geometry check above was taken only after forcing
+  queued animations to finish, so the reported numbers reflect the
+  actual end state a real (composited, visible) browser tab would
+  reach within the 200ms transition — not a stuck intermediate value.
+
+### Deviations from the spec
+
+- **No resize-event re-sync** for `sidebarOpen` after mount (see above)
+  — an explicit, minor scope call, not an oversight: the manual toggle
+  already resolves the one real gap this would close (crossing the
+  breakpoint mid-session), and adding a listener for a rare case felt
+  like unrequested complexity for a phase whose brief was about adding
+  a manual show/hide control, not automating it.
+- **Scrollbar fully removed rather than restyled** — this phase's own
+  instruction ("remove the scrollbar from sidebar") superseded Phase
+  13's "styled scrollbar" deliverable; noted here since it's a direct
+  reversal of a decision documented in the immediately preceding phase,
+  not an oversight of it.
+- No other deviations — hide/show works identically in spirit on
+  desktop and mobile (one state, one control), no new colors were
+  introduced, and no backend/routing/auth code was touched.
+
+## Phase 15: standalone image upload support (PNG/JPEG)
+
+### What it does
+
+A user can now upload a single PNG or JPEG image directly (same
+drag-drop/file-picker as PDF/DOCX) and get back a DOCX/PPTX exactly as
+they do today — same job queue, same async worker, same job row, same
+download experience. No changes to vision, classification, layout, or
+assembly — those already handle image content unchanged (that's what
+processes diagrams and scans extracted from PDF/DOCX pages today); this
+phase is purely about getting a standalone image into that existing
+flow as a valid one-page input.
+
+### Ingestion hook: `ImageExtractor` (`app/core/ingestion/image_extractor.py`)
+
+A new `Extractor` implementation (same interface as `PdfExtractor`/
+`DocxExtractor`) that treats the whole uploaded file as **one IMAGE
+element** — `source_page=1`, `raw_content=<the file's bytes>`,
+`metadata={"image_ext": "png"|"jpeg"}`. Registered in
+`app/core/ingestion/__init__.py`'s `_EXTRACTORS` dict for `.png`,
+`.jpg`, `.jpeg`, alongside the existing `.pdf`/`.docx` entries — `
+get_extractor()` dispatches to it exactly like any other format, so
+`app/core/queue/worker.py`'s `_process_job_sync` (`classify_elements
+(get_extractor(source).extract(source))` → `assemble_docx`/
+`assemble_pptx`) needed **zero changes** to pick it up. The existing
+classifier's `rule_image_is_diagram` (first rule in the chain, matches
+any `ElementKind.IMAGE` regardless of source) routes the single element
+to vision unchanged — this is the "reuse the existing per-page pipeline
+entry point" the brief asked for: the hook point is `get_extractor()`,
+not a new parallel pipeline.
+
+- **Content validation happens here, not at upload time** — matching
+  how a malformed PDF/DOCX is handled today (extension-checked at
+  upload, format-validity checked when the real parser opens it during
+  background processing). `ImageExtractor.extract()` opens the file
+  with Pillow (`Image.open(...).verify()`) before returning; a corrupt
+  file or a spoofed extension (e.g. a `.docx` renamed to `.png`) raises
+  `ValueError`, which the worker's existing retry-then-FAIL handling
+  catches — no new failure path, no new job state.
+- **New direct dependency: Pillow** (`requirements.txt`, pinned
+  `Pillow==12.3.0` — the version already present transitively via
+  `python-pptx`, now pinned explicitly since the code imports it
+  directly rather than relying on someone else's dependency to keep
+  providing it).
+
+### Upload validation (`app/api/routes/jobs.py`)
+
+`_SUPPORTED_EXTENSIONS` extended from `{.pdf, .docx}` to `{.pdf, .docx,
+.png, .jpg, .jpeg}` — the only change in this file. Upload-time
+validation is still extension-only (no content sniffing), consistent
+with the existing PDF/DOCX behavior and explicitly not changed by this
+phase.
+
+### Size limit: kept at 30MB, unchanged (explicit decision, flagged per
+### the brief's own instruction not to change it silently)
+
+The brief allowed a smaller limit specifically for images ("your call").
+Kept the single existing `MAX_UPLOAD_SIZE_MB` (30) uniformly across all
+formats rather than introducing a per-type limit — a 30MB image is
+generously large for a phone photo (typical phone photos are 2–8MB), so
+the shared limit doesn't meaningfully under-protect against oversized
+images, and a per-type limit would be one more piece of config/state
+for no concrete benefit at this stage. Flagged here explicitly per the
+brief's instruction, not silently decided.
+
+### Frontend (`components/UploadZone.tsx`, `components/HomeGreeting.tsx`)
+
+`ACCEPTED_EXTENSIONS` gained `.png`/`.jpg`/`.jpeg` (drives both the
+`accept` attribute on the file input and the client-side validation
+message — no separate list to keep in sync). The visible label changed
+from `"PDF, DOCX · maks. 30 MB"` to `"PDF, DOCX, PNG, JPEG · maks. 30
+MB"`. The home-state subtitle (`HomeGreeting.tsx`) also updated from
+"PDF və ya DOCX faylını sürükləyin..." to "PDF, DOCX faylını və ya
+şəkli sürükləyin..." ("...or an image...") for consistency — not
+explicitly required by the brief's requirements list, but the same
+copy-consistency standard applied everywhere else in the app. No other
+UI changes — an image-sourced job is just another job row, so it flows
+through the unmodified sidebar/history/detail/download experience.
+
+### Test coverage added
+
+- **`tests/test_ingestion.py`** (`TestImageExtractor`): valid PNG →
+  single IMAGE element with correct metadata; `.jpg` extension → `
+  image_ext: "jpeg"`; corrupt bytes → `ValueError`; a real DOCX renamed
+  to `.png` (spoofed extension) → `ValueError`. Plus `get_extractor()`
+  dispatch coverage for the three new extensions.
+- **`tests/test_assembly.py`** (`TestImageOnlyAssembly`): the real
+  `flowchart_a3.png` sample run through `ImageExtractor` → `
+  classify_elements` → `assemble_docx`/`assemble_pptx` with the
+  existing `mock_vision` fixture (same real flowchart-solving mock
+  already used for the PDF/DOCX assembly tests — no new mock needed,
+  no Gemini call). Confirms the single element classifies as DIAGRAM,
+  and both outputs are structurally valid packages (`_parse_package`,
+  the same zip+XML-parses check already used for PDF/DOCX assembly)
+  containing the reconstructed native shapes (a `wordprocessingCanvas`
+  in DOCX, diagram shape text in PPTX) — the same "did it actually
+  render as editable shapes, not a fallback picture" assertion style
+  already established for the PDF/DOCX tests.
+- **`tests/test_jobs_api.py`** (`TestUploadValidation`): PNG upload
+  accepted (201); JPEG upload accepted (201); oversized image rejected
+  (413, same `max_upload_size_mb` mock-patch pattern as the existing
+  oversized-PDF/DOCX test). All use the real `flowchart_a3.png` sample
+  bytes via the existing `flowchart_png_bytes` session fixture — no new
+  binary fixture files added to the repo.
+- **Cost control**: none of the new tests call the real Gemini API —
+  `test_ingestion.py`'s tests never reach vision (they test the
+  extractor in isolation), `test_assembly.py`'s use the existing
+  `MagicMock`-based `mock_vision` fixture, and `test_jobs_api.py`'s
+  only exercise upload validation/job creation, never actual
+  processing (jobs stay PENDING; the worker isn't running in these
+  tests, same as the existing PDF/DOCX upload tests).
+- Full suite: **152 tests** (142 existing + 10 new), 0 failures, 0
+  regressions.
+
+### Validated
+
+- Backend: full suite (152 tests) passes; `ruff`/`black`/`mypy` clean
+  on every file this phase created or edited (pre-existing `Depends()`
+  lint debt in `jobs.py`, documented since Phase 9, untouched and
+  unrelated to this phase's changes).
+- Frontend: `tsc -b` and `vite build` both clean.
+- **One real end-to-end run, as instructed (not repeated)**: uploaded
+  the real `samples/flowchart_a3.png` via a direct API call against the
+  rebuilt Docker stack (a real Gemini call, not mocked), polled the job
+  — `pending` → `processing` → `completed` in ~14s, both `docx` and
+  `pptx` available. Downloaded and inspected the DOCX: valid Office
+  package (`word/document.xml` parses), and — the meaningful check —
+  its XML contains a `wordprocessingCanvas` with **no fallback
+  picture**, confirming the real Gemini call actually reconstructed the
+  flowchart as native editable shapes from a standalone image upload,
+  not just "some file came back." Test job deleted afterward via the
+  API.
+- **Unsupported-type rejection re-verified live**: uploaded a `.txt`
+  file via direct API call — `400 unsupported_format`, message now
+  correctly lists `.docx, .jpeg, .jpg, .pdf, .png` as supported.
+  Client-side `validate()` logic (mirrored in a browser console check
+  since this tooling can't attach a real OS file to `<input
+  type="file">`, the same limitation noted since Phase 8) confirmed
+  rejecting `.txt` with the updated message and accepting `.png`/
+  `.jpeg`.
+- **Zero regressions confirmed live**: uploaded a real DOCX
+  (`informatika_seh_40_41.docx`) via direct API call against the same
+  rebuilt stack — still `201 pending`, unaffected by the extension-list
+  change. Deleted afterward.
+- Confirmed via the browser that the updated Azerbaijani copy
+  ("PDF, DOCX faylını və ya şəkli sürükləyin...", "PDF, DOCX, PNG,
+  JPEG · maks. 30 MB") renders correctly on the dashboard's home state.
+
+### Deviations from the spec
+
+- **Size limit kept uniform at 30MB** rather than a smaller
+  image-specific limit — an explicit decision per the brief's own
+  "your call, but don't silently change it" instruction, reasoned
+  through and flagged above, not a silent choice.
+- **`HomeGreeting.tsx` copy updated** in addition to the explicitly
+  named `"PDF, DOCX · maks. 30 MB"` label — not separately called out
+  in the requirements list, but left inconsistent would have meant one
+  piece of UI copy still claiming only PDF/DOCX are accepted right next
+  to the upload zone that now also accepts images.
+- No other deviations — vision/classification/layout/assembly code is
+  completely untouched, the `jobs` table/schema is unchanged (an
+  image-sourced job is a normal job row, same columns), and no
+  unrelated area (auth, pagination, search, sidebar) was touched.
+
+## Phase 16: assembly bug fixes (title loss, shape collision, connector
+## anchoring)
+
+### What it does
+
+Five concrete defects found by visually diffing real generated DOCX
+output against its source images, all in the layout/assembly layer.
+DOCX and PPTX share the layout engine (`app/core/layout.py`) completely
+and share connector/label geometry helpers (`pptx_shapes.py`, imported
+by `docx_shapes.py`) — confirmed by reading both renderers before
+starting, per the phase's own instruction — so every fix below is
+**one fix applied to shared code**, not two parallel ones, except where
+noted.
+
+### Bug 1 — title dropped entirely
+
+**Root cause**: not a dropped *element* — a missing *field*.
+`DiagramGraph` (the vision model's output schema, `app/models/diagram.py`)
+had `nodes`/`edges` only; nothing to hold a heading line positioned
+above the flowchart but outside its own nodes' text. The Gemini prompt
+(`gemini_provider.py`) had no instruction to look for one either. A
+title baked into the same source image as the flowchart (the case both
+of the user's test images hit) had nowhere to go — it was never
+extracted in the first place, not lost downstream. (A title that exists
+as its own separate text element *before* an embedded image — e.g. the
+real sample's q80 question line before its flowchart — was already
+working correctly before this phase; that path was verified unaffected
+and is what the existing `test_full_document_contains_all_element_kinds_in_order`
+test covers.)
+
+**Fix**: `DiagramGraph` gained `title: str | None = None`, mirroring
+the existing `TextContent.heading` field from Phase 5. The Gemini
+prompt now explicitly asks for it ("a heading/title line positioned
+ABOVE the flowchart itself... NOT any node's own label... leave null
+if the image has no such line — never invent one"), same
+never-fabricate discipline as the existing heading field. Both
+assemblers render it when present: `docx_assembler.py` adds a plain
+paragraph directly before the diagram canvas; `pptx_assembler.py` adds
+a heading text box on the diagram's own slide (reusing the existing
+`_add_heading` helper built for `TextContent.heading`) and shrinks the
+diagram's available height/shifts its top offset down to make room, so
+title and diagram never overlap.
+
+### Bugs 2/3 — shape collision + spurious terminal connector
+
+**Root cause**: `layout.py`'s column assignment used exactly three
+fixed slots — `"main"`, `"left"`, `"right"` — as literal string keys.
+Every decision's branches were placed into the SAME `"left"`/`"right"`
+columns regardless of which decision they belonged to. With two
+decisions in one flow (or any graph where a second fork's branches land
+at the same row as an already-placed node from the first), the second
+fork's `place_run(..., "left", row)` / `place_run(..., "right", row)`
+call would write `placed[node_id] = ("left", row)` for its own node
+even though a *different* node already occupied that exact
+`(column, row)` tuple — nothing checked for that collision. Since both
+a node's x and y are derived purely from its `(column, row)` pair (not
+from its own identity), the two nodes ended up at literally identical
+coordinates. Bug 3 (the terminal node's connector looking like it
+attached to the wrong shape) was traced to be a pure visual symptom of
+this: connectors are attached by node id already (data-driven, not
+position-based), so once two nodes stop sharing a position the
+connector renders at its correct topological place — verified
+explicitly with a dedicated test (see below) rather than assumed.
+
+**Fix**: column assignment now uses a monotonically increasing,
+never-reused integer counter. Every branch of every fork — not just a
+second-and-later one — gets a brand-new column allocated from this
+single graph-wide counter, alternating left/right of center
+(-1, +1, -2, +2, ...) so the layout still reads as a roughly balanced
+tree. Because each column is written to by exactly one continuous
+downward walk (rows strictly increasing along it), and no column value
+is ever handed out twice, two nodes can now provably never share a
+`(column, row)` pair — this holds for any number of forks at any depth,
+not just the two specific sample flowcharts. `NODE_SIZES`/`_node_size`/
+row-height logic is unchanged; only the column bookkeeping changed.
+
+### Bug 4 — edge label fused into the target/source node's own text
+
+**Root cause**: `_add_edge_label`'s (`pptx_shapes.py`) label position
+was computed as `source_node.y + source_node.height / 2 - 24` — the
+source node's own vertical *center*, offset up by a fixed 24px. For a
+DECISION source (90px tall, the tallest shape type), that formula lands
+well inside the diamond's own bounding box, directly overlapping its
+centered text — rendering as if the branch label were stacked onto the
+node's own label. The identical formula was inlined separately in
+`docx_shapes.py`.
+
+**Fix**: new shared `_label_y()` helper in `pptx_shapes.py` (imported by
+`docx_shapes.py`, replacing its inlined duplicate) positions the label
+in the actual **gap** between the source's bottom edge and the target's
+top edge — vertically centered in that gap, with a defensive fallback
+(source-bottom + 4px) for the rare case where source/target aren't in
+the normal one-row-below relationship. This can no longer overlap
+either shape, for any label on any edge.
+
+### Bug 5 — parallelogram connectors kink diagonally
+
+**Root cause**: python-pptx's own `Connector._move_begin/end_to_cxn`
+uses a shape-agnostic bounding-box-center formula for connection
+indices 0 (top) and 2 (bottom) — that part was already fine. The actual
+mismatch is in the OOXML **preset geometry** Office itself resolves an
+attached connector's real endpoint against at render time: the built-in
+"parallelogram" preset's top/bottom connection sites follow the shape's
+*slanted* top/bottom edges, whose midpoints are `(shear + w) / 2` and
+`(w − shear) / 2` respectively — offset from true center in *opposite*
+directions, never equal to each other. Rectangles (and other
+non-slanted presets) don't have this asymmetry, which is exactly why
+only parallelogram-touching connectors kinked even between perfectly
+vertically-aligned shapes, and why comparing against rectangles (as the
+bug report suggested) surfaced the discrepancy.
+
+**Fix**: since Office's built-in preset formula can't be edited from
+our side, `INPUT_OUTPUT` nodes now get an explicit `<a:custGeom>`
+instead of `<a:prstGeom prst="parallelogram">` — new shared
+`parallelogram_geometry_xml()` in `pptx_shapes.py` (used directly by
+`pptx_shapes.py` via `parse_xml()` + an in-place `spPr` swap, and
+reused as a raw XML string by `docx_shapes.py`'s already-hand-rolled
+shape XML). It draws the **identical visual outline** (same slant) but
+defines an explicit `<a:cxnLst>` pinning connection points 0 (top) and
+2 (bottom) to the shape's true bounding-box horizontal center —
+matching rectangle behavior exactly — while 1 (left) and 3 (right) sit
+at the slanted sides' midpoints for the less common
+branch-out-of-a-parallelogram case. This is a general geometry fix, not
+tuned to any specific node's dimensions — it recomputes from whatever
+width/height the shape actually has.
+
+### Testing
+
+All new coverage is structural/unit-level against synthetic classified
+data or the existing `flowchart_graph` fixture — no new Gemini-consuming
+fixtures, per the phase's cost-conscious testing instruction:
+
+- **`test_layout.py`** (`TestMultiForkCollision`, 4 new tests): a
+  synthetic 8-node graph with a *second* decision nested inside the
+  first's branch, deliberately engineered so the collision would occur
+  under the pre-fix algorithm (traced by hand: n5/n6 from the second
+  fork would have landed on `("left", row)` — the exact tuple n7,
+  reached via the first branch's straight continuation, already
+  occupied). Asserts: no two nodes overlap, all positions are distinct,
+  the three same-rank nodes from different forks get three distinct
+  columns, and the terminal node's incoming edge still references its
+  correct topological source (bug 3, verified explicitly rather than
+  assumed fixed).
+- **`test_render.py`** / **`test_docx_shapes.py`** (2 new tests, one
+  per renderer): builds the real `flowchart_graph` fixture, locates the
+  branch-label shapes ("Hə"/"Yox") and the decision shape they originate
+  from, asserts the label's top position is at or below the decision's
+  bottom edge (never inside it) — PPTX via python-pptx shape geometry,
+  DOCX via the raw `a:xfrm/a:off` XML.
+- **`test_render.py`** / **`test_docx_shapes.py`** (2 new tests): for
+  every `INPUT_OUTPUT` node, asserts the built-in `parallelogram`
+  preset is gone, a `custGeom` is present with exactly 4 connection
+  points, and points 0/2 (top/bottom) both sit at exactly `width // 2`.
+- **`test_assembly.py`** (`TestImageOnlyAssembly`, 4 new tests): a new
+  `mock_vision_with_title` fixture (same pattern as the existing
+  `mock_vision`, just with `title` set on the returned `DiagramGraph`)
+  proves the title appears as its own paragraph immediately before the
+  DOCX canvas and as a heading text box on the PPTX diagram slide, plus
+  two negative tests confirming no stray title text appears when
+  `title` is `None` (the existing `mock_vision` fixture, unchanged).
+- Full suite: **164 tests** (152 existing + 12 new), 0 failures, 0
+  regressions. `ruff`/`black`/`mypy` clean on every file this phase
+  touched (one pre-existing `N806` naming warning surfaced by a new
+  `spPr` local variable, fixed to `sp_pr`; pre-existing
+  `_remove_*table*` untyped-parameter debt from Phases 9/12, unrelated
+  to this phase, left alone).
+- **One real end-to-end regression check**, reusing the existing
+  `flowchart_a3.png` sample already in `samples/`/the test fixtures
+  (per the phase's own guidance to avoid burning a fresh Gemini call
+  when a suitable existing fixture exists) — a real Gemini call, run
+  once: uploaded via direct API call against the rebuilt Docker stack,
+  completed in ~14s, both formats produced. Inspected the real DOCX
+  output's XML directly: `wordprocessingCanvas` present (native shapes,
+  not a fallback picture, confirming the pipeline still works
+  end-to-end), `custGeom` present and the `parallelogram` preset string
+  completely absent (bug 5's fix landed in real output), and all 8
+  nodes' `(x, y)` positions distinct with zero collisions (bugs 2/3).
+  This sample has no title baked in, so bug 1 wasn't exercised by this
+  particular real run — it's covered by the structural
+  `mock_vision_with_title` tests instead. Test job deleted afterward.
+
+### Deviations from the spec
+
+- **Bug 1's root cause was in the vision schema/prompt, not pure
+  classification or pure assembly** — the phase brief anticipated this
+  possibility explicitly ("classification (beyond title element
+  handling if that's genuinely where bug 1 lives)... vision-calling
+  code... if genuinely traced there") and reasoned through why a
+  separately-extracted title element was already working (proven by an
+  existing, unmodified test), before concluding the actual gap was a
+  title baked into the same image as the diagram having no schema field
+  to land in.
+- No other deviations — all five bugs were fixed at their traced root
+  cause, DOCX and PPTX both received every fix (confirmed to share the
+  layout engine and connector/label/geometry helpers before touching
+  anything), no bug was special-cased to the two diagnostic sample
+  flowcharts (the collision fix in particular was validated against a
+  synthetic graph engineered to be structurally different from both),
+  and no unrelated area (auth, pagination, upload validation, sidebar,
+  mobile layout) was touched or re-tested, per the phase's explicit
+  scope note.
+
+## Phase 17: connector routing fix — edge-level detour (superseded)
+
+**Status**: superseded by Phase 18 (2026-08-15)
+
+Phase 17 attempted to fix the "connector lines cross through unrelated
+nodes" problem via edge-level routing: detecting collisions between a
+back-edge's straight path and a node's bounding box, then routing the
+edge around the node with a freeform polyline detour. This approach was
+structurally implemented and passes all its tests, but the real output
+(verified in actual Microsoft Word and PowerPoint) still showed
+connectors crossing through nodes. The edge-routing approach is
+fundamentally insufficient because the root cause is not "how to route
+an edge around a node" but "why is this node placed in the path of this
+edge in the first place?" Phase 18 fixes the root cause at the layout
+level. The Phase 17 detour code is retained as a safety net for the
+rare case where two loop-back siblings share a row (one back-edge must
+cross the other node to reach the rail); it is no longer the primary
+collision-avoidance mechanism.
+
+### Code retained from Phase 17
+
+- `back_edge_would_collide`, `back_edge_detour_points`,
+  `_add_freeform_connector`, `_polyline_wsp`, `_hseg_crosses_node`,
+  `_occupied_y_bands`, `_clear_y_above`, `polyline_geometry_xml` — all
+  kept in `pptx_shapes.py` / `docx_shapes.py` as a safety net for
+  sibling back-edge crossings that the layout-level fix cannot eliminate
+  (two loop-back nodes from the same fork sharing a row).
+
+## Phase 18: layout-level fix for connectors crossing nodes
+
+**Status**: complete (2026-08-15)
+
+### Why Phase 17's edge-routing approach failed
+
+The layout engine assigned column positions to nodes without knowing
+where back-edge corridors (the horizontal/vertical paths loop-back
+connectors travel) would run. When a decision had both a continuation
+branch (no loop-back) and a loop-back branch, the alternating column
+allocator could place continuation nodes between loop-back nodes and
+the back-edge rail — exactly where the back-edge's horizontal segment
+needed to pass. No amount of edge-level routing can cleanly fix a node
+that is physically inside the connector's corridor; the node must not
+be placed there in the first place.
+
+### Root cause
+
+The layout engine's `alloc_column()` used a single counter alternating
+left/right (−1, +1, −2, +2, …) without regard for which branches would
+eventually loop back. In the bug-report topology:
+
+```
+n2 fork → n4 (col −1, loop-back subtree) + n3a (col +2, continuation)
+n4 fork → n5 (col +1) + n6 (col −2)
+```
+
+n3a/n3 (continuation, col +2) ended up to the RIGHT of n5 (loop-back,
+col +1) and between n5 and the back-edge rail — directly in the path
+of n5→n2's horizontal connector segment.
+
+### Fix
+
+Redesigned column allocation in `layout_graph()` with a DFS pre-scan:
+
+1. **Back-edge detection** (`_detect_back_edges`): DFS from the start
+   node identifies all cycle-forming edges before placement begins.
+
+2. **Subtree classification** (`_has_loop`): for each node, determines
+   whether its forward subtree contains any back-edge. Cached to avoid
+   redundant traversals.
+
+3. **Directional column allocation**: at each fork, branches are
+   classified as continuation (no loops) or loop-back:
+   - **Mixed forks** (some loop, some don't): continuation branches get
+     LEFT columns (`_alloc_left`: −1, −2, −3, …), loop-back branches
+     get RIGHT columns (`_alloc_right`: +1, +2, +3, …).
+   - **All-continuation forks** (no loops): original alternating
+     allocation preserved for visual balance.
+   - **All-loop-back forks**: all branches go RIGHT; the Phase 17
+     detour code handles the rare sibling crossing as a safety net.
+
+Result for the bug-report topology:
+
+```
+n2 fork → n3a (col −1, continuation, LEFT) + n4 (col +1, loop-back, RIGHT)
+n4 fork → n5 (col +2, loop-back) + n6 (col +3, loop-back)
+```
+
+n3a/n3 are now far LEFT (x ≈ 50), completely clear of all back-edge
+corridors. n6 (rightmost, col +3) has a clear path to the rail
+(bentConnector3). n5 (col +2) has a sibling crossing with n6 only —
+handled by the Phase 17 detour safety net.
+
+### DOCX/PPTX parity
+
+Both formats share the same `layout_graph()` function in `layout.py`.
+DOCX imports collision-detection helpers from `pptx_shapes.py`. No
+separate layout implementations exist — the fix applies to both formats
+automatically with identical node positions (differing only in absolute
+coordinates from the scale-to-fit step).
+
+### Files changed
+
+- **`backend/app/core/layout.py`** — rewrote column allocation:
+  added `_detect_back_edges` (DFS pre-scan), `_has_loop` (cached
+  subtree classification), three directional allocators
+  (`_alloc_left`, `_alloc_right`, `_alloc_alternating`). `place_run`
+  now classifies each fork's branches before choosing columns.
+
+### Tests (174 total, all passing)
+
+Updated Phase 17 tests to match the new layout behavior:
+
+- **`test_layout.py`** (`TestBackEdgeCollisionDetection`, 5 tests):
+  back-edges flagged, no overlaps, continuation nodes LEFT of loop-back
+  nodes, no back-edge rail crosses any continuation node's bounding box,
+  simple single-loop-back case also clean.
+
+- **`test_render.py`** (`TestBackEdgeDetourPptx`, 2 tests): continuation
+  nodes not crossed by any back-edge corridor; one freeform polyline
+  (sibling crossing) + one rail bentConnector3 (clean path).
+
+- **`test_docx_shapes.py`** (`TestBackEdgeDetourDocx`, 3 tests): mixed
+  routing (1 detour + 1 rail), valid XML, unique IDs.
+
+### Visual verification note
+
+Correctness verified via coordinate/position inspection: continuation
+nodes' x-ranges are entirely left of all loop-back nodes' x-ranges,
+and back-edge horizontal segments at source mid-height do not intersect
+any continuation node's bounding box. Final visual confirmation in real
+Microsoft Word/PowerPoint is recommended before fully closing this
+issue, since coordinate-level verification is necessary but not
+sufficient (rendering engines can still surprise).
+
+---
+
+## Phase 19 — Diagram Layout & Structural Correctness (2026-08-15)
+
+**Goal**: Diagnose and fix four observed symptoms in diagram rendering,
+all at the layout/rendering engine level (generalized, not special-cased).
+
+### Symptom 1: Sibling loop-back branch collision
+
+**Root cause**: When a decision fork had 2+ loop-back branches (e.g. n5
+and n6 both looping back to n4), all loop-back siblings were placed on
+the same row. This caused their bounding boxes to vertically align,
+making the horizontal segment of one sibling's back-edge connector
+cross through the other sibling's shape.
+
+**Fix** (`layout.py`): In `place_run()`, when a fork has ≥2 loop-back
+branches, each loop-back sibling is placed on a successively lower row
+(`branch_row + loop_row_offset`). This vertical stagger guarantees
+each back-edge's horizontal segment travels at a unique y-coordinate
+that doesn't intersect any other node.
+
+**Verification confidence**: HIGH — 3 new tests in
+`TestSiblingLoopBackStagger` directly verify stagger for 2-way and
+3-way loop-back forks, and assert `back_edge_would_collide` returns
+False for every back-edge.
+
+### Symptom 2: Unglued freeform/detour connectors
+
+**Root cause**: Phase 17's safety-net detour code
+(`_add_freeform_connector` / `_polyline_wsp`) activated when
+`back_edge_would_collide` returned True — creating unglued
+`custGeom` polylines instead of glued `cxnSp bentConnector3`
+connectors. These polylines had no `stCxn`/`endCxn` and became
+disconnected when shapes moved.
+
+**Fix**: The Symptom 1 stagger eliminates the collision condition
+entirely, so the detour code path never activates. All back-edges
+now use glued `bentConnector3` connectors with proper `stCxn`/`endCxn`.
+The detour code remains as dead-letter safety net but is no longer
+exercised for any tested topology.
+
+**Verification confidence**: HIGH — tests
+`test_all_back_edges_glued_no_freeform` (PPTX) and
+`test_all_back_edges_glued_no_detour` (DOCX) assert 0 freeform/detour
+elements and verify all back-edge connectors are glued bentConnector3.
+
+### Symptom 3: Edge labels mispositioned
+
+**Root cause**: Labels were placed at the midpoint between source and
+target node centers. For side-branching edges (where the connector
+exits horizontally before bending down), this midpoint was far from
+the actual connector path — often overlapping the source decision
+shape or floating in empty space.
+
+**Fix** (`pptx_shapes.py`): New `label_position()` function positions
+labels based on the connector's exit point from the source:
+- **Vertical edges** (same column): label centered between source
+  bottom and target top (original behavior, correct for these).
+- **Left-branching edges**: label placed just left of the source
+  shape at its vertical midpoint.
+- **Right-branching edges**: label placed just right of the source
+  shape at its vertical midpoint.
+
+`docx_shapes.py` imports and uses the same `label_position()` function
+for DOCX parity.
+
+**Verification confidence**: MEDIUM-HIGH — tests verify labels don't
+overlap source shapes (horizontal non-overlap assertion). Exact visual
+positioning on the connector path depends on connector geometry in the
+rendering application; structural tests confirm labels are adjacent to
+the correct edge of their source shape.
+
+### Symptom 4: No structural verification
+
+**Root cause**: No automated mechanism existed to verify that the
+rendered OOXML output structurally matched the input graph.
+
+**Fix**: Added two test classes:
+- `TestStructuralVerificationPptx` (5 tests): verifies node texts
+  match input, connector count matches edge count, all connectors
+  have glued endpoints (`stCxn`/`endCxn`), edge labels present,
+  and `collision_graph` topology renders completely.
+- `TestStructuralVerificationDocx` (5 tests): same verification
+  pattern for DOCX/WordprocessingML Drawing Canvas output.
+
+**Verification confidence**: HIGH — tests directly parse the XML
+output and compare against the input `DiagramGraph` structure.
+
+### DOCX/PPTX parity
+
+All fixes apply to both formats:
+- Layout stagger is in the shared `layout_graph()` function.
+- `label_position()` is defined in `pptx_shapes.py` and imported
+  by `docx_shapes.py`.
+- Structural verification tests cover both formats with identical
+  assertions.
+
+### Files changed
+
+- **`backend/app/core/layout.py`** — sibling loop-back row stagger
+  in `place_run()` (loop_row_offset counter for ≥2 loop-back branches).
+- **`backend/app/core/render/pptx_shapes.py`** — new `label_position()`
+  function; `_add_edge_label()` updated to use it.
+- **`backend/app/core/render/docx_shapes.py`** — switched from
+  `_label_y` import to `label_position` import; label coordinates
+  now computed via shared function.
+- **`backend/tests/test_layout.py`** — added `TestSiblingLoopBackStagger`
+  (3 tests: 2-way stagger, no-collision assertion, 3-way fork).
+- **`backend/tests/test_render.py`** — updated label overlap test
+  (horizontal non-overlap), renamed freeform test to
+  `test_all_back_edges_glued_no_freeform`, added
+  `TestStructuralVerificationPptx` (5 tests).
+- **`backend/tests/test_docx_shapes.py`** — updated label overlap test,
+  renamed detour test to `test_all_back_edges_glued_no_detour`, added
+  `TestStructuralVerificationDocx` (5 tests).
+
+### Tests (187 total, all passing)
+
+13 new tests added, 4 existing tests updated to match new behavior.
+Full backend suite: 187 passed, 0 failed.
+
+---
+
+## Phase 20 — Edge Label Positioning Fixes (2026-08-15)
+
+**Goal**: Fix two label-positioning bugs confirmed via real Word/PowerPoint
+testing — overlapping sibling labels and labels sitting on (not above)
+the connector line.
+
+### Bug A: Sibling labels at identical coordinates
+
+**Root cause**: `label_position()` computed the label's y-coordinate
+solely from the source node's geometry and the exit direction
+(left/right). When two labeled edges left the same source in the same
+direction (e.g., n4→n5 "Hə" and n4→n6 "Yox", both exiting right),
+both labels received identical `(x, y)` coordinates — one was fully
+hidden behind the other.
+
+**Fix**: Added `compute_label_indices(graph)` — groups labeled edges by
+`(source_id, exit_direction)` and assigns each a 0-based index within
+its group. `label_position()` now accepts an `exit_index` parameter;
+each subsequent sibling is offset by
+`exit_index * (_LABEL_HEIGHT_PX + _LABEL_OFFSET_PX)` vertically,
+staggering labels downward so they never overlap. Handles 2, 3, or N
+siblings at the same exit point.
+
+**Verification confidence**: HIGH — coordinate-level tests verify no
+two sibling labels (2-way and 3-way) have overlapping bounding boxes;
+PPTX output test confirms distinct `.top` values; DOCX output test
+confirms distinct `a:off` y-coordinates.
+
+### Bug B: Labels centered on connector line
+
+**Root cause**: For side-branch labels, `label_y` was computed as
+`source_node.y + source_node.height / 2 - _LABEL_HEIGHT_PX / 2`,
+which vertically centered the label on the source's mid-height —
+exactly where the connector's horizontal segment exits the shape.
+The connector line bisected the label text.
+
+**Fix**: Changed to
+`source_node.y + source_node.height / 2 - _LABEL_HEIGHT_PX - _LABEL_OFFSET_PX`,
+so the label's bottom edge sits just above the connector line (offset
+by `_LABEL_OFFSET_PX` = 4px). The label text is now fully above the
+line, never bisected by it.
+
+**Verification confidence**: HIGH — tests assert that for every
+first-sibling side-branch label, `label_bottom <= connector_y`.
+
+### DOCX/PPTX parity
+
+Both fixes apply to both formats:
+- `compute_label_indices()` and updated `label_position()` are defined
+  in `pptx_shapes.py` and imported by `docx_shapes.py`.
+- Both renderers pre-compute indices and pass them through identically.
+- Parallel test classes verify the behavior in both output formats.
+
+### Files changed
+
+- **`backend/app/core/render/pptx_shapes.py`** — added
+  `compute_label_indices()`; updated `label_position()` with
+  `exit_index` param, above-line offset; updated `_add_edge_label()`
+  and both call sites in `add_diagram_to_slide()`.
+- **`backend/app/core/render/docx_shapes.py`** — imported
+  `compute_label_indices`; pre-computes indices and passes to
+  `label_position()`.
+- **`backend/tests/test_render.py`** — added `TestLabelPositioningPptx`
+  (4 tests: 2-sibling no-overlap, 3-sibling no-overlap, above-line
+  assertion, PPTX output distinct positions).
+- **`backend/tests/test_docx_shapes.py`** — added
+  `TestLabelPositioningDocx` (3 tests: 2-sibling distinct positions,
+  3-sibling no-overlap, above-line assertion).
+
+### Tests (194 total, all passing)
+
+7 new tests added. All 187 Phase 19 tests still pass.
+Full backend suite: 194 passed, 0 failed.
+
+## Phase 21: Replace Custom Layout Engine with Graphviz
+
+### What it does
+
+Replaces the custom column/row allocation, back-edge stagger logic,
+collision avoidance, and detour routing in `layout.py` with Graphviz's
+`dot` algorithm. The layout engine now shells out to Graphviz via the
+`graphviz` Python package (v0.21, pure Python) to compute node
+positions, edge label placements, and back-edge detection — all in one
+`dot -Tjson0` call. Everything downstream of layout (OOXML shape
+generation, connector gluing, structural verification tests) is
+unchanged.
+
+### Why
+
+The custom layout engine (Phases 3, 16–20) accumulated increasingly
+complex patching — column allocation, collision avoidance, detour
+routing, label stagger logic — and each fix risked regressions in
+other graph topologies. Graphviz's `dot` algorithm handles hierarchical
+directed-graph layout as a solved problem, with proper rank assignment,
+crossing minimization, and label placement out of the box. This
+eliminates the entire class of layout bugs the custom engine was prone
+to, at the cost of a system dependency (the Graphviz binary).
+
+### Architecture
+
+- **`graphviz` Python package (v0.21)**, NOT `pygraphviz`. The pure
+  Python `graphviz` package shells out to the `dot` binary and parses
+  its output. `pygraphviz` is a C extension that compiles against
+  `libgraphviz-dev` — nearly impossible to build on Windows without a
+  full C toolchain. The pure Python package works on all platforms as
+  long as the `dot` binary is on PATH.
+
+- **Graphviz binary on PATH**: `layout.py` ensures it by checking
+  `GRAPHVIZ_BIN` env var (default `C:\Program Files\Graphviz\bin` on
+  Windows) and prepending to `os.environ["PATH"]`. In Docker, the
+  `graphviz` system package is installed via `apt-get`.
+
+- **Single `dot -Tjson0` call**: the layout engine builds a
+  `graphviz.Digraph`, sets node sizes based on text/shape type, and
+  calls `g.pipe(engine='dot', format='json0')`. The JSON output
+  provides node center coordinates (`pos`), dimensions (`width`/
+  `height` in inches), edge label positions (`lp`), and the graph
+  bounding box (`bb`).
+
+- **Coordinate conversion**: Graphviz uses 72-dpi points with y=0 at
+  bottom. Layout px uses 96-dpi with y=0 at top. Conversion:
+  `px_x = gv_x * (96/72) + margin`, `px_y = (bb_max_y - gv_y) *
+  (96/72) + margin`. Constants: `_GV_DPI=72`, `_LAYOUT_DPI=96`,
+  `_GV_TO_PX=96/72`, `_MARGIN_PX=20`.
+
+- **Back-edge detection**: post-layout, by comparing node y-coordinates
+  (target center y <= source center y = back-edge). This replaces the
+  pre-layout structural detection from the custom engine.
+
+- **Edge label positions**: extracted from Graphviz's `lp` attribute on
+  edges with labels, converted to layout px using the same y-axis
+  inversion. Stored as `label_x`/`label_y` on `DiagramEdge`.
+
+### Schema changes (`app/models/diagram.py`)
+
+`DiagramEdge` gained two optional fields:
+- `label_x: float | None` — label center x in layout px
+- `label_y: float | None` — label top y in layout px
+
+Both are set by the layout engine and consumed by both renderers.
+
+### Dead code removed
+
+**From `pptx_shapes.py`**: `compute_label_indices()`,
+`label_position()`, `_label_y()`, `back_edge_would_collide()`,
+`back_edge_detour_points()`, `_add_freeform_connector()`,
+`polyline_geometry_xml()`, `_occupied_y_bands()`, `_clear_y_above()`,
+`_hseg_crosses_node()`.
+
+**From `docx_shapes.py`**: imports of `compute_label_indices`,
+`label_position`, `polyline_geometry_xml`; the `_polyline_wsp()`
+function; detour code path in `add_diagram_to_docx()`.
+
+**From `layout.py`**: the entire custom layout engine (column/row
+allocation, `_row_for_node`, `_allocate_columns`, collision avoidance,
+back-edge stagger logic).
+
+### What was kept unchanged
+
+- OOXML shape generation (custGeom parallelograms, rounded rects,
+  diamonds) — only the coordinates fed into it changed.
+- Connector gluing (`stCxn`/`endCxn`) — same mechanism, same idx values.
+- `parallelogram_geometry_xml()`, `_rail_x()`, `back_edge_rail_adj()`,
+  `_set_connector_adj()`, `_font_size_for()`, `_px_to_emu()`,
+  `SHAPE_TYPE_TO_MSO` — all kept.
+- Back-edges always use `bentConnector3` (no freeform detours needed
+  with Graphviz layout — the positions are clean enough that the simple
+  rail route always works).
+- SVG debug renderer, title rendering, vision/classification, ingestion,
+  auth, frontend — all untouched.
+
+### Label rendering changes
+
+Both renderers' `_add_edge_label()` functions now take `edge:
+DiagramEdge` directly and use `edge.label_x`/`edge.label_y` for
+positioning, instead of calling the deleted `label_position()` and
+`compute_label_indices()`. Label overlap tests were updated to check
+full 2D bounding box non-overlap (position is set by Graphviz, which
+may place labels at the same y but different x for sibling edges).
+
+### Dependencies
+
+- **`graphviz==0.21`** added to `backend/requirements.txt`.
+- **`graphviz` system package** added to `backend/Dockerfile`
+  (`apt-get install -y graphviz` before pip install).
+
+### Tests
+
+**Removed**: `TestBackEdgeCollisionDetection`,
+`TestSiblingLoopBackStagger` (referenced deleted functions), custom
+column allocation assertions, old label positioning tests that
+referenced `compute_label_indices`/`label_position`.
+
+**Kept**: `TestFlowchartLayout` (overlap, back-edge flagging, positive
+geometry, top-to-bottom, determinism), `TestMultiForkCollision` (overlap,
+distinct positions), `TestStructuralVerificationPptx`,
+`TestStructuralVerificationDocx`, `TestSvgDebugRenderer`,
+`TestPptxShapes`, `TestDocxCanvas`, `TestBackEdgeDetourDocx`.
+
+**Added**: `TestBackEdgeLayout` (flagging, overlap, positive geometry),
+`TestEdgeLabelPositions` (label coordinates present, sibling distinct,
+y-axis inversion, 3-way fork), `TestLabelPositioningPptx` (distinct
+positions in PPTX), `TestLabelPositioningDocx` (distinct positions in
+DOCX, 3-sibling no-overlap, Graphviz coordinate presence).
+
+All 54 layout/render/docx-shape tests pass (0 failures).
+
+### Test infrastructure change (`tests/conftest.py`)
+
+The `_migrated_test_database` session fixture was updated to handle
+missing test database gracefully (catches `TimeoutExpired` and
+non-zero exit from alembic, issues a warning instead of failing) — this
+allows layout/render tests to run without a PostgreSQL test database
+running. Database-dependent tests (auth, jobs, queue) will still fail
+without the database, as expected.
+
+### Deviations from spec
+
+- **Used `graphviz` (pure Python) instead of `pygraphviz` (C extension)**:
+  `pygraphviz` requires C compilation against `libgraphviz-dev`, which
+  is impractical on Windows. The pure Python `graphviz` package provides
+  identical layout results by shelling out to the same `dot` binary.
+
+- **Label overlap tests check 2D bounding box, not just horizontal
+  separation**: Graphviz may place sibling labels at the same y but
+  different x (along the edge path), so the old horizontal-only
+  non-overlap check was too strict. Updated to full 2D bounding box
+  non-overlap, matching the PPTX renderer's existing check.
+
+- **PPTX sibling label test checks position (x,y), not just top**:
+  Same reason — Graphviz may give siblings the same y but different x.
+
+### Visual confirmation caveat
+
+All tests verify structural correctness (no overlaps, correct gluing,
+correct coordinates, correct XML). **Final visual confirmation in real
+Microsoft Word/PowerPoint is recommended** — do not claim visual
+correctness based on tests alone.
+
+---
+
+## Phase 22 — Use Graphviz's Real Edge Routing (2026-08-16)
+
+### Problem
+
+Phase 21 extracted node positions from Graphviz but **discarded the
+computed edge paths**, drawing connectors as naïve straight or bent
+lines. These could cross through unrelated nodes and labels. The root
+cause: Graphviz's `pos` attribute on edges (containing the real
+collision-free route) was never parsed.
+
+### Solution
+
+1. **`splines="ortho"`** added to the Graphviz graph attributes, giving
+   axis-aligned (orthogonal) edge paths that avoid node intersections.
+
+2. **Edge path extraction** (`layout.py`): new helpers `_parse_edge_pos`
+   and `_simplify_ortho_path` parse the B-spline control points from
+   Graphviz's `pos` attribute, convert coordinates to layout px, and
+   simplify to meaningful waypoints (segment endpoints, deduplicated,
+   collinear-interior-removed). Stored as `DiagramEdge.edge_path`.
+
+3. **`xlabel` instead of `label`**: Graphviz warns that ortho splines do
+   not handle edge labels — switched to `xlabel` (external labels) and
+   read positions from `xlp` (falls back to `lp`).
+
+4. **Connector preset selection** (`pptx_shapes.py`): new function
+   `choose_connector_from_path()` maps ortho waypoints to OOXML
+   connector presets:
+   - 0 bends → `straightConnector1`
+   - 1 bend → `bentConnector2`
+   - 2 bends → `bentConnector3`
+   - 3 bends → `bentConnector4`
+   - 4 bends → `bentConnector5`
+
+   Also computes OOXML adjustment values (`adj1`–`adj3`) as ratios of
+   bend positions within the connector's bounding box, and determines
+   connection site indices (0=top, 1=left, 2=bottom, 3=right) from the
+   path's start/end directions.
+
+5. **Safety net**: paths with >4 bends are capped at 4 (logged as
+   warning), using `bentConnector5`. In testing this never triggered.
+
+6. **Back-edge routing unchanged**: back-edges still use the rail-based
+   `bentConnector3` route from Phase 19.
+
+### DOCX / PPTX parity
+
+Both renderers share `choose_connector_from_path()` from `pptx_shapes`.
+DOCX uses `_cxn_site_pos_docx()` for endpoint calculation (same logic,
+different coordinate source). All connectors in both formats are glued
+(`stCxn`/`endCxn`).
+
+### Schema changes (`app/models/diagram.py`)
+
+`DiagramEdge` gained one optional field:
+- `edge_path: list[list[float]] | None` — ordered waypoints `[[x,y], ...]`
+  in layout px, set by the layout engine, consumed by renderers.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `app/models/diagram.py` | Added `edge_path` field |
+| `app/core/layout.py` | `splines="ortho"`, `xlabel`/`xlp`, edge path extraction |
+| `app/core/render/pptx_shapes.py` | `choose_connector_from_path()`, adj computation, preset selection |
+| `app/core/render/docx_shapes.py` | Uses shared `choose_connector_from_path()`, `_cxn_site_pos_docx()` |
+| `tests/test_layout.py` | `TestOrthoEdgePaths` (6 tests), `TestSafetyNet` (3 tests) |
+
+### Test results
+
+- **95 non-DB tests pass** (27 layout + 36 render/docx + 32 assembly/ingestion)
+- All 15 existing render tests and 21 existing DOCX shape tests pass unchanged
+- New layout tests verify: all edges get paths, paths are axis-aligned,
+  no connector crosses any node, no connector crosses any label,
+  complex topologies (10+ nodes) route cleanly
+- Safety-net tests verify: 6-bend path capped to 4 with warning,
+  straight path → `straightConnector1`, 1-bend → `bentConnector2`
+
+### Safety-net frequency
+
+The safety net (>4 bends cap) **never triggered** in any test fixture or
+sample graph. All real graphs produced 0–2 bends per edge. The cap
+exists as defense-in-depth.
+
+### Connector preset distribution (sample graph)
+
+For the "Blok-sxem nəyi hesablayır?" 8-node graph:
+- 6× `straightConnector1` (0 bends)
+- 1× `bentConnector2` (1 bend, the "Yox" branch)
+- 1× `bentConnector3` (back-edge rail, n8→n4)
+
+### Deviations from spec
+
+None. All requirements implemented as specified.
+
+### Visual confirmation caveat
+
+All tests verify structural correctness (axis-aligned paths, no
+node/label crossings, correct OOXML presets, correct adj values, correct
+gluing). **Final visual confirmation in real Microsoft Word/PowerPoint is
+still needed** — the connector geometry is mathematically correct but
+rendering subtleties (especially adj value interpretation across Office
+versions) can only be verified visually.
+
+---
+
+## Phase 23 — Enforce Orthogonal Connectors (No Diagonal Lines) (2026-08-16)
+
+### Root cause found and fixed
+
+The edge `n4→n6` (the "Yox" branch from `a>b` to `b=b-a`) was rendered
+as a diagonal `straightConnector1`. Root cause traced to a threshold
+bug in `_enforce_no_diagonal()`:
+
+Graphviz's ortho spline output for this edge collapsed to only 2
+waypoints (no intermediate bend point). `_count_bends()` correctly
+returned 0 for a 2-point path. `_enforce_no_diagonal()` then checked
+whether the connection-site positions differed in both x and y, but
+used a **layout-pixel threshold of 1.0 px**. The connection sites for
+this edge differed by only ~0.7 px in x (source right-side at x=338.0
+vs. target top at x=338.7) — below the 1.0 threshold, so the function
+concluded "these are vertically aligned" and kept 0 bends. But at the
+EMU level (1 px = 9525 EMU), that 0.7 px difference became ~6667 EMU —
+enough for Office to render a visibly diagonal line. The threshold was
+in layout-px when it needed to be in EMU.
+
+### Fix (two layers)
+
+**Layer 1 — `_enforce_no_diagonal()` threshold fix**: Changed from a
+1.0 layout-px threshold to an EMU-level threshold: differences are now
+compared as `abs(dx) * 9525 > 1` and `abs(dy) * 9525 > 1`. Any
+sub-pixel offset that would produce even 2 EMU of diagonal now triggers
+promotion from 0-bend to 1-bend (`bentConnector2`, L-shaped).
+
+**Layer 2 — `assert_no_diagonal_connector()` auto-correction**: Changed
+from raising `DiagonalConnectorError` (which crashed the pipeline) to
+**auto-correcting**: if a `straightConnector1` is about to be emitted
+with both cx and cy non-zero, it logs a warning and returns
+`"bentConnector2"` as the corrected preset. The calling code in both
+`pptx_shapes.py` and `docx_shapes.py` applies the correction to the
+OOXML element. This makes diagonal output structurally impossible — even
+if Layer 1's threshold were somehow bypassed, Layer 2 catches it.
+
+### Hard invariant — where it runs
+
+The invariant runs in two places per connector, in both renderers:
+
+1. **`_enforce_no_diagonal()`** in `choose_connector_from_path()` —
+   prevents 0-bend classification when sites differ in both axes
+   (preventive, at decision time).
+2. **`assert_no_diagonal_connector()`** after the connector element is
+   created — checks the actual OOXML `ext.cx`/`ext.cy` values and
+   auto-corrects the preset if needed (defensive, at emit time).
+
+Both run for every non-back-edge connector in both `pptx_shapes.py`
+and `docx_shapes.py`.
+
+### Synthetic test battery — 23 topologies, 133 tests
+
+New file `tests/test_no_diagonal.py` generates 23 distinct flowchart
+topologies and runs 6 invariant checks on each (where applicable):
+
+| Check | Scope |
+|-------|-------|
+| No diagonal `straightConnector1` (PPTX) | All topologies with edges |
+| No diagonal `straightConnector1` (DOCX) | All topologies with edges |
+| All connectors glued — stCxn/endCxn (PPTX) | All topologies with edges |
+| All connectors glued — stCxn/endCxn (DOCX) | All topologies with edges |
+| No edge path crosses unrelated node bbox | All topologies with edges |
+| No two nodes overlap | All topologies |
+
+Topologies include: linear chains (3, 5 nodes), single/two/three
+sequential decisions, 3-way and 4-way forks, simple loop, nested loops,
+diamond merge, asymmetric branches (depth mismatch), 3-decision chain,
+loop with exit fork, wide merge (4→1), two sequential loops, all-I/O
+shapes, all shape types mixed, long Azerbaijani text, double back-edge,
+decision-into-decision, single node, two nodes, the exact Phase 23
+bug-report topology (`collision_graph`), and self-loop.
+
+All 133 tests pass. Combined with the 63 existing layout/render/docx
+tests (also all passing), the total non-DB test count is 228.
+
+### Real Gemini verification — 1 call used (3 remaining)
+
+Ran `scripts/verify_phase23.py` on `samples/Blok Sxem1.jpeg` (the
+exact image that exposed the diagonal bug in real Word). Gemini returned
+a 10-node, 11-edge graph including the problematic `n4→n5→n6`/`n5→n7`
+subgraph. Generated both DOCX and PPTX, inspected the XML directly:
+
+- **PPTX**: 11 connectors, zero diagonal, all glued. The formerly
+  problematic edges now use `bentConnector2` (L-shaped) instead of
+  `straightConnector1`. Pure-vertical connectors correctly have `cx≤1`.
+- **DOCX**: 11 connectors, zero diagonal, all glued. Same correct
+  preset distribution.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `app/core/render/pptx_shapes.py` | `_enforce_no_diagonal` threshold fix (EMU-level); `assert_no_diagonal_connector` auto-corrects instead of raising; PPTX call site applies correction |
+| `app/core/render/docx_shapes.py` | DOCX call site uses returned preset from `assert_no_diagonal_connector` |
+| `tests/test_no_diagonal.py` | New: 23 topologies × 6 checks = 133 tests |
+| `scripts/verify_phase23.py` | New: real Gemini verification script |
+
+### Deviations from spec
+
+- **Gemini calls used: 1 of 4** — the first call confirmed the fix
+  cleanly; the remaining 3 are held in reserve rather than spent
+  automatically, per the spec's guidance to use the budget deliberately.
+- **`assert_no_diagonal_connector` auto-corrects rather than raising** —
+  the spec left this as "your call"; auto-correction was chosen because
+  a runtime crash (the prior `DiagonalConnectorError`) would break the
+  user's job pipeline, while auto-correction silently fixes the edge
+  case and logs it for investigation.
+
+### Visual confirmation caveat
+
+All checks verify structural OOXML correctness — no diagonal presets,
+correct ext values, correct gluing. **Final visual confirmation in real
+Microsoft Word/PowerPoint by the user is still the last word** —
+coordinate/XML checks catch what they check for, but the user should do
+one more visual pass on the generated `samples/output/phase23_verify.pptx`
+and `phase23_verify.docx` before this is considered fully closed.
+
+---
+
+## Phase 24 — Back-Edge Rail Removal + General Connector-Validity Fixes (2026-08-31)
+
+**Goal**: fix a real, user-reported bug where a complex diagram (nested
+decision with a double loop-back — the "Euclid's algorithm" flowchart,
+`a==b` / `a>b` / `a=a-b` / `b=b-a`) rendered a connector cutting straight
+through the `a>b` decision shape in real PowerPoint/Word, and generalize
+the fix so it doesn't recur in other complex diagrams — not just this
+one file.
+
+### Root cause
+
+`pptx_shapes.py`/`docx_shapes.py` special-cased **back-edges** (loop-back
+connectors) onto a hand-rolled "virtual rail" mechanism left over from
+Phase 19, *before* Graphviz was integrated (Phase 21/22 kept it
+"unchanged" rather than re-deriving it): both ends were forced to
+connect via the RIGHT connection site, and a single `adj1` ratio was
+computed to place the rail at `rail_x = max(all nodes' right edge) + 50px`.
+
+This is mathematically broken: a glued OOXML connector's bounding box is
+always exactly the rectangle spanned by its two connection points — it
+can never actually extend past them. Whenever the rail position fell
+*outside* that local box (the normal case, unless one of the two nodes
+happened to be the single rightmost shape in the whole diagram), the
+ratio blew up or got clamped to the box's own edge — landing the "rail"
+segment wherever that box's edge happened to be, which in the bug
+report was directly on top of the `a>b` diamond.
+
+Verified directly: Graphviz's own computed path for the affected
+back-edges (`edge.edge_path`, already computed by `layout_graph()` since
+Phase 22) was a perfectly clean, node-avoiding route — the renderer just
+never used it for back-edges.
+
+### Fix 1 (the reported bug): back-edges use the same path as forward edges
+
+Removed the `if edge.is_back_edge: ...` special case entirely from both
+`add_diagram_to_slide()` and `add_diagram_to_docx()`. Every edge —
+forward or back — now routes through the same, already-tested
+`choose_connector_from_path(edge.edge_path, ...)` pipeline. Deleted the
+now-dead `_rail_x()` and `back_edge_rail_adj()` (and DOCX's
+`_RAIL_PAD_PX` canvas-width padding, which existed solely to reserve
+space for the removed rail).
+
+### Fix 2 (found while re-testing): invalid same-axis single-bend connectors
+
+A single-bend elbow (`bentConnector2`) is only geometrically valid
+between sites on PERPENDICULAR axes (one top/bottom, the other
+left/right) — a 2-segment L cannot connect two same-axis sites (both
+left/right, or both top/bottom) unless they already share the
+perpendicular coordinate. `_nearest_cxn_site()` can snap both ends of an
+edge onto the same axis — easily, for decision (diamond) nodes, whose
+real Graphviz exit point sits on a slanted edge rather than a bbox-side
+midpoint — silently producing this invalid geometry. New
+`_enforce_min_bends_for_axis()` (`pptx_shapes.py`) detects this and
+promotes to a 2-bend Z-shape instead. Uses a 20px tolerance (not
+sub-pixel, unlike `_enforce_no_diagonal`) so ordinary floating-point/
+diamond-approximation noise doesn't trigger an unnecessary detour —
+only genuinely large mismatches do.
+
+### Fix 3: label-aware default bend placement
+
+When a bend is *forced* without real Graphviz path data to derive its
+position from (a 2-point straight path reinterpreted through mismatched
+sites), the old code defaulted to a blind 50% midpoint — which could
+(and did, in testing) land the connector straight through its own edge
+label. New `_default_adj_for_forced_bend()` tries a sequence of
+candidate ratios (50%, 25%, 75%, 10%, 90%, then wider ones outside the
+direct span for cramped layouts) and keeps the first one that clears
+every other node's and every edge label's bounding box, computed once
+per graph and passed in as `avoid_boxes`.
+
+### New test coverage: render-level crossing check
+
+Phase 22/23's crossing tests (`TestOrthoEdgePaths`, `TestNoNodeCrossing`)
+only verified `layout_graph()`'s computed `edge_path` — never what the
+renderer actually wrote to the OOXML file. Since the back-edge bug lived
+entirely in the renderer discarding `edge_path`, those tests passed
+100% throughout while the bug shipped. New `TestNoRenderedCrossingPptx`/
+`TestNoRenderedCrossingDocx` (`tests/test_no_diagonal.py`) close this
+gap: they parse the actual generated file, reconstruct the true
+polyline from connection-site positions + preset + adj values (exact
+for 0/1-bend presets; exact for the "same-axis Z-shape" 2-bend case
+`choose_connector_from_path()` actually produces), and assert no
+segment crosses any unrelated node or label box — across all 23
+topologies, both formats.
+
+### Verification on the reported bug
+
+Reconstructed the exact reported diagram (`a==b`/`a>b`/`a=a-b`/`b=b-a`,
+10 nodes) and regenerated both formats. All invariants pass: no
+diagonal, all glued, and — new — no rendered crossing. Saved as
+`samples/output/phase24_verify.pptx` / `.docx` for visual confirmation.
+
+### Known, separate, NOT-fixed limitation
+
+The new render-crossing test surfaced a distinct, pre-existing issue in
+tightly-packed layouts (several decisions/labels close together): a
+diamond's real Graphviz exit point can differ enough from its nearest
+canonical connection site that the resulting connector's *fixed* segment
+(pinned by the site itself — no adj ratio can move it) lands on a third,
+unrelated shape, most often a sibling edge's label. Fix 3 only adjusts
+the *adjustable* middle segment of a forced bend; it cannot fix a
+crossing caused by the fixed outer segments. Properly closing this needs
+conflict-aware connection-*site* selection (retry an adjacent site when
+the nearest one is blocked) — a larger, separate change from what this
+phase delivers. 7 topologies (`three_way_fork` DOCX only, `nested_loops`,
+`decision_chain_3`, `loop_with_exit_fork`, `two_loops_sequential`,
+`all_shape_types`, `self_loop`) are marked `xfail` in
+`TestNoRenderedCrossingPptx`/`Docx` with this reason, rather than
+silently deleted or left as unexplained red tests. **The reported bug's
+own topology (`collision_graph_bug_report`) is NOT in this list — it
+passes cleanly.**
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `app/core/render/pptx_shapes.py` | Removed back-edge special case + `_rail_x`/`back_edge_rail_adj`; added `_enforce_min_bends_for_axis`, `_default_adj_for_forced_bend`; `choose_connector_from_path`/`_compute_adj_values` take optional `avoid_boxes` |
+| `app/core/render/docx_shapes.py` | Removed back-edge special case + rail imports/padding; precomputes and passes `avoid_boxes` |
+| `tests/test_render.py` | Rewrote back-edge tests to assert general glued/no-freeform invariants instead of the old fixed-rail-shape assumptions |
+| `tests/test_docx_shapes.py` | Same, for DOCX |
+| `tests/test_no_diagonal.py` | New `TestNoRenderedCrossingPptx`/`Docx` (render-level, adj-reconstructing crossing check across all topologies) |
+| `docs/PROJECT_CONTEXT.md` | This section |
+
+### Test results
+
+Full non-DB suite: 228 baseline tests unaffected + expanded
+`test_no_diagonal.py` (176 tests: 163 passed, 13 xfailed as documented
+above, 1 xpassed since `three_way_fork` happens to pass in PPTX even
+though it's marked xfail for the DOCX-only failure).

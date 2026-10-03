@@ -13,7 +13,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow, dict_row
 
-from app.core.auth.models import Role, User
+from app.core.auth.models import RefreshToken, Role, User
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,17 @@ def _row_to_user(row: DictRow) -> User:
         role=Role(row["role"]),
         is_active=row["is_active"],
         created_at=row["created_at"],
+    )
+
+
+def _row_to_refresh_token(row: DictRow) -> RefreshToken:
+    return RefreshToken(
+        id=row["id"],
+        user_id=row["user_id"],
+        token_hash=row["token_hash"],
+        issued_at=row["issued_at"],
+        expires_at=row["expires_at"],
+        revoked=row["revoked"],
     )
 
 
@@ -109,3 +120,56 @@ class UserStore:
         """Delete a user row; return True if a row was deleted."""
         cursor = self._conn.execute("DELETE FROM users WHERE id = %s", (user_id,))
         return cursor.rowcount > 0
+
+
+class RefreshTokenStore:
+    """Synchronous, psycopg-backed refresh-token store.
+
+    Only hashed tokens are ever persisted (see
+    ``security.generate_refresh_token``) — ``get_valid_by_hash`` is the
+    only read path callers should use for validating an incoming cookie,
+    since it already excludes revoked/expired rows.
+    """
+
+    def __init__(self, dsn: str) -> None:
+        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        self._conn.execute("SET TIME ZONE 'UTC'")
+
+    def close(self) -> None:
+        """Close the underlying database connection."""
+        self._conn.close()
+
+    def create(
+        self, *, token_id: UUID, user_id: UUID, token_hash: str, expires_at: datetime
+    ) -> RefreshToken:
+        """Insert a new refresh-token row and return it."""
+        now = datetime.now(timezone.utc)
+        row = self._conn.execute(
+            """
+            INSERT INTO refresh_tokens
+                (id, user_id, token_hash, issued_at, expires_at, revoked)
+            VALUES (%s, %s, %s, %s, %s, FALSE)
+            RETURNING *
+            """,
+            (token_id, user_id, token_hash, now, expires_at),
+        ).fetchone()
+        assert row is not None
+        return _row_to_refresh_token(row)
+
+    def get_valid_by_hash(self, token_hash: str) -> RefreshToken | None:
+        """Return the token row if it exists, is unrevoked, and unexpired."""
+        row = self._conn.execute(
+            """
+            SELECT * FROM refresh_tokens
+            WHERE token_hash = %s AND revoked = FALSE AND expires_at > %s
+            """,
+            (token_hash, datetime.now(timezone.utc)),
+        ).fetchone()
+        return _row_to_refresh_token(row) if row is not None else None
+
+    def revoke_by_hash(self, token_hash: str) -> None:
+        """Mark the token with this hash as revoked (no-op if not found)."""
+        self._conn.execute(
+            "UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = %s",
+            (token_hash,),
+        )

@@ -27,7 +27,12 @@ from xml.sax.saxutils import escape
 from docx.document import Document
 from lxml import etree
 
-from app.core.render.pptx_shapes import _font_size_for, _rail_x, back_edge_rail_adj
+from app.core.render.pptx_shapes import (
+    _font_size_for,
+    assert_no_diagonal_connector,
+    choose_connector_from_path,
+    parallelogram_geometry_xml,
+)
 from app.models.diagram import LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -43,8 +48,6 @@ _NSDECL = (
     f'xmlns:wps="{_NS_WPS}" xmlns:wpc="{_NS_WPC}"'
 )
 
-# DrawingML preset geometries — same four symbols as Phase 3's
-# MSO_SHAPE mapping, spelled as prstGeom preset names.
 SHAPE_TYPE_TO_PRST: dict[ShapeType, str] = {
     ShapeType.TERMINATOR: "roundRect",
     ShapeType.PROCESS: "rect",
@@ -53,11 +56,11 @@ SHAPE_TYPE_TO_PRST: dict[ShapeType, str] = {
 }
 
 _EMU_PER_PX = 9525
-_LINE_WIDTH_EMU = 19050  # 1.5 pt, matching the PPTX output
-_RAIL_PAD_PX = 20.0  # canvas space kept right of the back-edge rail
-# Connection site indices on preset geometries: 0=top, 1=left, 2=bottom,
-# 3=right (same convention as the pptx connection point indices).
+_LINE_WIDTH_EMU = 19050  # 1.5 pt
 _CXN_TOP, _CXN_LEFT, _CXN_BOTTOM, _CXN_RIGHT = 0, 1, 2, 3
+
+_LABEL_WIDTH_PX = 60.0
+_LABEL_HEIGHT_PX = 22.0
 
 
 def _shape_wsp(
@@ -70,15 +73,19 @@ def _shape_wsp(
     font_pt: int,
 ) -> str:
     """A wps:wsp autoshape with a real, editable centred text box."""
-    prst = SHAPE_TYPE_TO_PRST[node.shape_type]
-    sz_half_pt = font_pt * 2  # w:sz is in half-points
+    sz_half_pt = font_pt * 2
+    if node.shape_type == ShapeType.INPUT_OUTPUT:
+        geometry = parallelogram_geometry_xml(cx, cy)
+    else:
+        prst = SHAPE_TYPE_TO_PRST[node.shape_type]
+        geometry = f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
     return (
         "<wps:wsp>"
         f'<wps:cNvPr id="{shape_id}" name="node-{escape(node.id)}"/>'
         "<wps:cNvSpPr/>"
         "<wps:spPr>"
         f'<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
-        f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
+        f"{geometry}"
         '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
         f'<a:ln w="{_LINE_WIDTH_EMU}">'
         '<a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
@@ -110,12 +117,7 @@ def _connector_wsp(
     arrow: bool = True,
     adj: dict[str, int] | None = None,
 ) -> str:
-    """A wps:wsp connector, attached at both ends via stCxn/endCxn.
-
-    ``start``/``end`` are (shape_id, connection_site_idx) of sibling
-    shapes inside the same canvas. ``adj`` holds explicit adjustment
-    values for the preset geometry (e.g. ``{"adj1": -21739}``).
-    """
+    """A wps:wsp connector, attached at both ends via stCxn/endCxn."""
     st = f'<a:stCxn id="{start[0]}" idx="{start[1]}"/>'
     en = f'<a:endCxn id="{end[0]}" idx="{end[1]}"/>'
     tail = '<a:tailEnd type="triangle"/>' if arrow else ""
@@ -165,17 +167,29 @@ def _label_wsp(
 def _segment(
     x0: float, y0: float, x1: float, y1: float
 ) -> tuple[float, float, float, float, str]:
-    """Normalise connector endpoints to (x, y, w, h, flip-attrs).
-
-    DrawingML extents must be positive; direction is expressed via
-    flipH/flipV on a:xfrm.
-    """
+    """Normalise connector endpoints to (x, y, w, h, flip-attrs)."""
     flip = ""
     if x1 < x0:
         flip += ' flipH="1"'
     if y1 < y0:
         flip += ' flipV="1"'
     return min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0), flip
+
+
+def _cxn_site_pos_docx(
+    node: LayoutedNode, idx: int
+) -> tuple[float, float]:
+    """Return the (x, y) position of a connection site on a node."""
+    cx = node.x + node.width / 2
+    cy = node.y + node.height / 2
+    if idx == _CXN_TOP:
+        return cx, node.y
+    elif idx == _CXN_BOTTOM:
+        return cx, node.y + node.height
+    elif idx == _CXN_LEFT:
+        return node.x, cy
+    else:
+        return node.x + node.width, cy
 
 
 def add_diagram_to_docx(
@@ -188,23 +202,7 @@ def add_diagram_to_docx(
     max_height_emu: int | None = None,
     relative_from: str = "paragraph",
 ) -> None:
-    """Inject the layouted graph into ``document`` as ONE native canvas.
-
-    The whole diagram is a single ``wp:anchor`` holding a ``wpc:wpc``
-    drawing canvas; shapes/connectors are positioned canvas-relative.
-
-    ``relative_from``:
-
-    - ``"paragraph"`` (default): positionH ``relativeFrom="column"``,
-      positionV ``relativeFrom="paragraph"`` — the diagram flows with
-      its anchor paragraph. (OOXML's ST_RelFromH has no "paragraph"
-      value — that invalid combination is exactly what broke Phase 4's
-      output — "column" is the horizontal equivalent.)
-    - ``"page"``: both axes ``relativeFrom="page"`` (pinned to the page).
-
-    The diagram is uniformly scaled down (never up) to fit within
-    ``max_width_emu`` × ``max_height_emu``.
-    """
+    """Inject the layouted graph into ``document`` as ONE native canvas."""
     if not graph.nodes:
         logger.warning("Empty graph; nothing added to document")
         return
@@ -215,9 +213,7 @@ def add_diagram_to_docx(
     else:
         raise ValueError(f"Unsupported relativeFrom: {relative_from!r}")
 
-    # Canvas size in layout px: the graph bounds plus the back-edge rail.
-    rail = _rail_x(graph)
-    canvas_w_px = max(graph.canvas_width, rail + _RAIL_PAD_PX)
+    canvas_w_px = graph.canvas_width
     canvas_h_px = graph.canvas_height
 
     scale = 1.0
@@ -229,7 +225,7 @@ def add_diagram_to_docx(
     def emu(px: float) -> int:
         return int(px * scale * _EMU_PER_PX)
 
-    next_id = 2  # id 1 is the wp:docPr of the anchor itself
+    next_id = 2
     ids_by_node: dict[str, int] = {}
     children: list[str] = []
 
@@ -248,85 +244,73 @@ def add_diagram_to_docx(
         )
         next_id += 1
 
+    # Precompute every node's and label's layout-px box once, so a
+    # connector that needs a bend position without real Graphviz path
+    # data (see _enforce_min_bends_for_axis) can steer clear of them
+    # instead of blindly bisecting onto a label.
+    node_boxes = {
+        n.id: (n.x, n.y, n.x + n.width, n.y + n.height) for n in graph.nodes
+    }
+    label_boxes = [
+        (e.label_x, e.label_y, e.label_x + _LABEL_WIDTH_PX, e.label_y + _LABEL_HEIGHT_PX)
+        for e in graph.edges
+        if e.label and e.label_x is not None and e.label_y is not None
+    ]
+
     for edge in graph.edges:
         source = graph.node_by_id(edge.source_id)
         target = graph.node_by_id(edge.target_id)
         source_id = ids_by_node[edge.source_id]
         target_id = ids_by_node[edge.target_id]
-        if edge.is_back_edge:
-            # ONE bentConnector3 (right → up → left) attached at both
-            # ends, so Word recomputes the whole path when shapes move.
-            # adj1 places the vertical rail as a ratio of the horizontal
-            # span between the connection points (negative = outside the
-            # bounding box, right of the source) — same computation as
-            # the PPTX renderer, no fixed waypoint coordinates.
-            sx = source.x + source.width
-            sy = source.y + source.height / 2
-            tx = target.x + target.width
-            ty = target.y + target.height / 2
-            x, y, w, h, flip = _segment(sx, sy, tx, ty)
-            children.append(
-                _connector_wsp(
-                    shape_id=next_id,
-                    name=f"backedge-{edge.source_id}-{edge.target_id}",
-                    prst="bentConnector3",
-                    x=emu(x),
-                    y=emu(y),
-                    cx=emu(w),
-                    cy=emu(h),
-                    flip=flip,
-                    start=(source_id, _CXN_RIGHT),
-                    end=(target_id, _CXN_RIGHT),
-                    adj={"adj1": back_edge_rail_adj(source, target, rail)},
-                )
+
+        # Back-edges and forward edges both route through Graphviz's own
+        # collision-free ortho path (edge.edge_path) via the same
+        # choose_connector_from_path() pipeline — see the matching
+        # comment in pptx_shapes.add_diagram_to_slide() for why the old
+        # hand-rolled "rail" special-case for back-edges was removed.
+        avoid_boxes = [
+            box for nid, box in node_boxes.items()
+            if nid not in (edge.source_id, edge.target_id)
+        ] + label_boxes
+        preset, start_idx, end_idx, adjs, bend_count = choose_connector_from_path(
+            edge.edge_path, source, target, avoid_boxes
+        )
+
+        x0, y0 = _cxn_site_pos_docx(source, start_idx)
+        x1, y1 = _cxn_site_pos_docx(target, end_idx)
+        x, y, w, h, flip = _segment(x0, y0, x1, y1)
+
+        preset = assert_no_diagonal_connector(
+            preset, emu(w), emu(h),
+            f"{edge.source_id}->{edge.target_id}",
+        )
+
+        name_prefix = "backedge" if edge.is_back_edge else "edge"
+        children.append(
+            _connector_wsp(
+                shape_id=next_id,
+                name=f"{name_prefix}-{edge.source_id}-{edge.target_id}",
+                prst=preset,
+                x=emu(x),
+                y=emu(y),
+                cx=emu(w),
+                cy=emu(h),
+                flip=flip,
+                start=(source_id, start_idx),
+                end=(target_id, end_idx),
+                adj=adjs if adjs else None,
             )
-            next_id += 1
-        else:
-            source_cx = source.x + source.width / 2
-            target_cx = target.x + target.width / 2
-            if abs(source_cx - target_cx) < 1.0:
-                # Same column: straight vertical line, bottom → top.
-                x0, y0 = source_cx, source.y + source.height
-                x1, y1 = target_cx, target.y
-                prst = "line"
-                start_idx = _CXN_BOTTOM
-            else:
-                # Branch out of a decision: leave the facing side at
-                # mid-height, one bend, arrive at the target's top.
-                y0 = source.y + source.height / 2
-                x0 = source.x if target_cx < source_cx else source.x + source.width
-                x1, y1 = target_cx, target.y
-                prst = "bentConnector2"
-                start_idx = _CXN_LEFT if target_cx < source_cx else _CXN_RIGHT
-            x, y, w, h, flip = _segment(x0, y0, x1, y1)
-            children.append(
-                _connector_wsp(
-                    shape_id=next_id,
-                    name=f"edge-{edge.source_id}-{edge.target_id}",
-                    prst=prst,
-                    x=emu(x),
-                    y=emu(y),
-                    cx=emu(w),
-                    cy=emu(h),
-                    flip=flip,
-                    start=(source_id, start_idx),
-                    end=(target_id, _CXN_TOP),
-                )
-            )
-            next_id += 1
-        if edge.label:
-            label_x = (
-                (source.x + source.width / 2) + (target.x + target.width / 2)
-            ) / 2
-            label_y = source.y + source.height / 2 - 24
+        )
+        next_id += 1
+        if edge.label and edge.label_x is not None and edge.label_y is not None:
             children.append(
                 _label_wsp(
                     edge.label,
                     next_id,
-                    emu(label_x),
-                    emu(label_y),
-                    emu(60),
-                    emu(22),
+                    emu(edge.label_x),
+                    emu(edge.label_y),
+                    emu(_LABEL_WIDTH_PX),
+                    emu(_LABEL_HEIGHT_PX),
                     max(int(12 * scale) - 1, 8),
                 )
             )
@@ -357,14 +341,13 @@ def add_diagram_to_docx(
     )
     paragraph = etree.fromstring(drawing_xml)
     body = document.element.body
-    # Keep the section properties (page setup) as the body's last child.
     sect_pr = body.find(f"{{{_NS_W}}}sectPr")
     if sect_pr is not None:
         sect_pr.addprevious(paragraph)
     else:
         body.append(paragraph)
     logger.info(
-        "Injected 1 canvas with %d shapes/connectors into DOCX " "(%d nodes, %d edges)",
+        "Injected 1 canvas with %d shapes/connectors into DOCX (%d nodes, %d edges)",
         next_id - 2,
         len(graph.nodes),
         len(graph.edges),

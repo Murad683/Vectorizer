@@ -98,8 +98,47 @@ class JobStore:
         self,
         status: JobStatus | None = None,
         owner_user_id: UUID | None = None,
+        search: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
     ) -> list[Job]:
-        """Return jobs, optionally filtered by status and/or owner, newest first."""
+        """Return jobs, optionally filtered/paginated, newest first.
+
+        ``search`` does a case-insensitive substring match (``ILIKE``)
+        against ``input_filename``.
+        """
+        where, params = self._filter_clause(status, owner_user_id, search)
+        query = f"SELECT * FROM jobs {where} ORDER BY created_at DESC"  # noqa: S608
+        if limit is not None:
+            query += " LIMIT %s"
+            params.append(limit)
+        if offset is not None:
+            query += " OFFSET %s"
+            params.append(offset)
+        rows = self._conn.execute(query, params).fetchall()
+        return [_row_to_job(r) for r in rows]
+
+    def count_jobs(
+        self,
+        status: JobStatus | None = None,
+        owner_user_id: UUID | None = None,
+        search: str | None = None,
+    ) -> int:
+        """Return the total count of jobs matching the given filters."""
+        where, params = self._filter_clause(status, owner_user_id, search)
+        row = self._conn.execute(
+            f"SELECT COUNT(*) AS c FROM jobs {where}",  # noqa: S608
+            params,
+        ).fetchone()
+        assert row is not None
+        return int(row["c"])
+
+    @staticmethod
+    def _filter_clause(
+        status: JobStatus | None,
+        owner_user_id: UUID | None,
+        search: str | None,
+    ) -> tuple[str, list[Any]]:
         conditions: list[str] = []
         params: list[Any] = []
         if status is not None:
@@ -108,12 +147,11 @@ class JobStore:
         if owner_user_id is not None:
             conditions.append("owner_user_id = %s")
             params.append(owner_user_id)
+        if search:
+            conditions.append("input_filename ILIKE %s")
+            params.append(f"%{search}%")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        rows = self._conn.execute(
-            f"SELECT * FROM jobs {where} ORDER BY created_at DESC",  # noqa: S608
-            params,
-        ).fetchall()
-        return [_row_to_job(r) for r in rows]
+        return where, params
 
     def delete_job(self, job_id: UUID) -> bool:
         """Delete a job row; return True if a row was deleted."""

@@ -121,3 +121,14 @@ body {
 .animate-pulse-slow {
   animation: pulse-slow 2s ease-in-out infinite;
 }
+
+/* Sidebar job list stays scrollable (wheel/touch/keyboard) but never
+   shows a visible scrollbar, in any engine (Phase 14 — superseded the
+   Phase 13 styled scrollbar per direct user feedback). */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

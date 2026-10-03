@@ -23,3 +23,14 @@ class User(BaseModel):
     role: Role = Role.MEMBER
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class RefreshToken(BaseModel):
+    """A refresh-token row. The raw token is never stored — only its hash."""
+
+    id: UUID
+    user_id: UUID
+    token_hash: str
+    issued_at: datetime
+    expires_at: datetime
+    revoked: bool = Field(default=False)

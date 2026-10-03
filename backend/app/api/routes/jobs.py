@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 _UPLOAD_DIR = Path("data/uploads")
-_SUPPORTED_EXTENSIONS = {".pdf", ".docx"}
+_SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".png", ".jpg", ".jpeg"}
 
 
 def _error(
@@ -101,19 +101,36 @@ async def create_job(
     )
 
 
+_DEFAULT_PAGE_SIZE = 20
+_MAX_PAGE_SIZE = 100
+
+
 @router.get("", response_model=None)
 async def list_jobs(
     request: Request,
+    limit: int = _DEFAULT_PAGE_SIZE,
+    offset: int = 0,
+    search: str | None = None,
     current_user: User = Depends(get_current_user),
 ) -> JSONResponse:
-    """Return the caller's jobs (admins see all jobs)."""
+    """Return a page of the caller's jobs (admins see all jobs).
+
+    ``limit``/``offset`` paginate, ``search`` case-insensitively matches
+    against the filename. Response shape: ``{items: [...], total: N}``,
+    ``total`` reflecting the filtered (not paginated) count.
+    """
     store = _get_store(request)
-    all_jobs = store.list_jobs()
-    if current_user.role == Role.ADMIN:
-        visible = all_jobs
-    else:
-        visible = [j for j in all_jobs if j.owner_user_id == current_user.id]
-    return JSONResponse(content=[_job_response(j) for j in visible])
+    limit = max(1, min(limit, _MAX_PAGE_SIZE))
+    offset = max(0, offset)
+    owner_filter = None if current_user.role == Role.ADMIN else current_user.id
+
+    items = store.list_jobs(
+        owner_user_id=owner_filter, search=search, limit=limit, offset=offset
+    )
+    total = store.count_jobs(owner_user_id=owner_filter, search=search)
+    return JSONResponse(
+        content={"items": [_job_response(j) for j in items], "total": total}
+    )
 
 
 @router.get("/{job_id}", response_model=None)

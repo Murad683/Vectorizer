@@ -194,14 +194,18 @@ def _add_vision_element(
     graph = result.diagram_graph
     slide = cursor.new_slide()
     if graph is not None and graph.edges:
+        diagram_top_in = 0.2
+        if graph.title:
+            _add_heading(cursor, graph.title)
+            diagram_top_in = cursor.y_in
         layouted = layout_graph(graph)
         add_diagram_to_slide(
             layouted,
             slide,
             offset_x_emu=Inches(0.5),
-            offset_y_emu=Inches(0.2),
+            offset_y_emu=Inches(diagram_top_in),
             max_width_emu=Inches(9),
-            max_height_emu=Inches(7),
+            max_height_emu=Inches(max(1.0, 7.2 - diagram_top_in)),
         )
     else:
         logger.warning(

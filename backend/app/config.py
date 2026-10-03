@@ -40,6 +40,17 @@ class Settings(BaseSettings):
     postgres_db: str = ""
 
     @property
+    def cookie_secure(self) -> bool:
+        """Whether the refresh-token cookie should carry the ``Secure`` flag.
+
+        ``True`` in prod (real HTTPS). ``False`` in dev so the cookie
+        still gets stored when the stack is exercised over plain HTTP
+        (e.g. via the Docker Compose frontend/backend on a LAN IP,
+        outside the ``localhost``-is-a-secure-context browser carve-out).
+        """
+        return self.environment == "prod"
+
+    @property
     def database_url(self) -> str:
         """Plain ``postgresql://`` conninfo string for psycopg connections.
 

@@ -1,11 +1,17 @@
-"""Password hashing (bcrypt via passlib) and JWT token management (PyJWT).
+"""Password hashing (bcrypt via passlib), JWT access tokens (PyJWT), and
+refresh-token generation/hashing.
 
-Token duration: 24 hours. This is a small internal team tool (not a
-public consumer app), so a day-long session avoids forcing teachers to
-re-login during a workday while still expiring tokens overnight. A
-refresh-token flow can be added later if needed.
+Token durations (Phase 12): the access token was shortened from the
+original 24h flat lifetime to 30 minutes now that a refresh-token flow
+backs the session — the access token being short-lived is the point,
+since refresh (httpOnly cookie) is what keeps the user logged in across
+a page reload. The refresh token itself lives 14 days and is rotated on
+every use (old one revoked, new one issued) to limit replay risk if a
+cookie is ever exfiltrated.
 """
 
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -18,7 +24,8 @@ from app.core.auth.models import Role
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 _ALGORITHM = "HS256"
-_TOKEN_LIFETIME = timedelta(hours=24)
+ACCESS_TOKEN_LIFETIME = timedelta(minutes=30)
+REFRESH_TOKEN_LIFETIME = timedelta(days=14)
 
 
 def hash_password(plain: str) -> str:
@@ -31,14 +38,15 @@ def verify_password(plain: str, hashed: str) -> bool:
     return _pwd_context.verify(plain, hashed)
 
 
-def create_access_token(user_id: UUID, role: Role) -> str:
-    """Create a signed JWT carrying the user's id and role."""
+def create_access_token(user_id: UUID, role: Role, email: str) -> str:
+    """Create a signed, short-lived JWT carrying the user's id, role, email."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "role": role.value,
+        "email": email,
         "iat": now,
-        "exp": now + _TOKEN_LIFETIME,
+        "exp": now + ACCESS_TOKEN_LIFETIME,
     }
     return jwt.encode(payload, get_settings().jwt_secret, algorithm=_ALGORITHM)
 
@@ -46,3 +54,19 @@ def create_access_token(user_id: UUID, role: Role) -> str:
 def decode_access_token(token: str) -> dict:
     """Decode and verify a JWT; raises ``jwt.PyJWTError`` on failure."""
     return jwt.decode(token, get_settings().jwt_secret, algorithms=[_ALGORITHM])
+
+
+def generate_refresh_token() -> tuple[str, str]:
+    """Return ``(raw_token, hashed_token)``.
+
+    Only the hash is ever persisted — the raw value is set as the cookie
+    and never stored, so a database read alone can't produce a usable
+    token.
+    """
+    raw = secrets.token_urlsafe(48)
+    return raw, hash_refresh_token(raw)
+
+
+def hash_refresh_token(raw: str) -> str:
+    """Hash a raw refresh token for storage/lookup (SHA-256, hex)."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

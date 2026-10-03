@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
 import { api, ApiError } from '../api/client';
 
-const ACCEPTED_EXTENSIONS = ['.pdf', '.docx'];
+const ACCEPTED_EXTENSIONS = ['.pdf', '.docx', '.png', '.jpg', '.jpeg'];
 const MAX_SIZE_MB = 30;
 
 interface Props {
@@ -86,7 +86,7 @@ export default function UploadZone({ onUploaded }: Props) {
         <input
           ref={inputRef}
           type="file"
-          accept=".pdf,.docx"
+          accept=".pdf,.docx,.png,.jpg,.jpeg"
           onChange={handleFileChange}
           className="hidden"
         />
@@ -107,7 +107,7 @@ export default function UploadZone({ onUploaded }: Props) {
               Faylı bura sürükləyin və ya <span className="text-ink font-medium underline underline-offset-2">seçin</span>
             </p>
             <p className="text-xs text-muted">
-              PDF, DOCX &middot; maks. {MAX_SIZE_MB} MB
+              PDF, DOCX, PNG, JPEG &middot; maks. {MAX_SIZE_MB} MB
             </p>
           </>
         )}

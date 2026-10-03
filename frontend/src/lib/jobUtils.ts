@@ -1,4 +1,5 @@
 import { api } from '../api/client';
+import type { JobResponse } from '../api/client';
 
 export const STATUS_LABELS: Record<string, string> = {
   pending: 'Gözləyir',
@@ -31,6 +32,49 @@ export function formatRelativeTime(iso: string): string {
   const diffDay = Math.floor(diffHour / 24);
   if (diffDay < 7) return `${diffDay} gün`;
   return new Date(iso).toLocaleDateString('az-AZ', { day: '2-digit', month: '2-digit' });
+}
+
+export interface JobGroup {
+  label: string;
+  jobs: JobResponse[];
+}
+
+function startOfDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+/**
+ * Groups an already-fetched, already-ordered job list into recency
+ * buckets for the sidebar — a pure display transform, no re-fetching.
+ * "Bu həftə" is the 6 calendar days before today (a 7-day window
+ * together with "Bu gün"); anything older falls into "Daha əvvəl".
+ * Empty buckets are omitted rather than rendered with an empty header.
+ */
+export function groupJobsByRecency(jobs: JobResponse[]): JobGroup[] {
+  const todayStart = startOfDay(new Date());
+  const weekStart = new Date(todayStart);
+  weekStart.setDate(weekStart.getDate() - 6);
+
+  const today: JobResponse[] = [];
+  const thisWeek: JobResponse[] = [];
+  const older: JobResponse[] = [];
+
+  for (const job of jobs) {
+    const createdDayStart = startOfDay(new Date(job.created_at));
+    if (createdDayStart.getTime() === todayStart.getTime()) {
+      today.push(job);
+    } else if (createdDayStart.getTime() >= weekStart.getTime()) {
+      thisWeek.push(job);
+    } else {
+      older.push(job);
+    }
+  }
+
+  const groups: JobGroup[] = [];
+  if (today.length) groups.push({ label: 'Bu gün', jobs: today });
+  if (thisWeek.length) groups.push({ label: 'Bu həftə', jobs: thisWeek });
+  if (older.length) groups.push({ label: 'Daha əvvəl', jobs: older });
+  return groups;
 }
 
 export async function downloadJobFile(jobId: string, format: string, filename: string) {

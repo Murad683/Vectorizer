@@ -3227,3 +3227,78 @@ drawings where arrows leave diamonds mid-edge).
 
 **Dependencies**: `opencv-python-headless`, `numpy==2.2.6` (numpy ≥2.3
 needs Python 3.12; CI/Docker use 3.11).
+
+## Phase 26 — Flowchart fidelity from manual Word tests (branch `feature/flowchart-fidelity`)
+
+**Trigger**: four textbook flowcharts rendered with real Gemini and checked in
+Word (now `samples/quadratic_equation.png`, `fahrenheit_celsius.png`,
+`sp_open_exit.png`, `sum_loop.jpg`). Defects: print blocks drawn as
+parallelograms, an edge crossing, invented text in an empty block, formulas as
+flat text, invented arrows in a drawing with an open exit, lost line breaks /
+subscripts, caption placed above instead of below.
+
+**Offline loop (no API cost)**
+- `DEBUG_DUMP_DIR` (set in docker-compose for dev): every vision call saves
+  image, marked image, prompt, raw first/retry answers, detection, final
+  graph and meta. `scripts/replay_diagram.py <dump>|--fixture NAME|--image+--graph`
+  re-runs detection → layout → DOCX/PPTX and prints `quality_issues()`.
+- Post-API logic lives in SDK-free `app/core/vision/postprocess.py`.
+- `tests/diagram_fixtures.py`: hand-built ideal answers for the 4 originals;
+  marks are simulated against the CURRENT detector.
+- `scripts/stress_layout.py` (+ `tests/test_routing_quality.py`): 22 synthetic
+  topologies drawn by Graphviz as scans → 20/22 clean (2 tangles exist in
+  the synthetic sources themselves); was 15/22.
+- `quality_issues()` (`app/core/diagram_quality.py`) also flags lines within
+  8 px of an unrelated symbol and parallel lines closer than 6 px.
+- Word itself was used for visual checks (DOCX → PDF via Word COM).
+
+**Detection** (`diagram_detect.py`)
+- Broken outlines (faint diamond tip) are recovered with a 7 px closing and
+  re-measured on the original ink (symmetric reach); before, `D = 0` and
+  `P < 10` were missed and both diagrams fell to approximate mode.
+- Empty areas walled in by connector lines are dropped (touch ≥ 2 symbols,
+  mostly inside another box, or small and empty).
+- Wavy-bottom outline → `DetectedShape.kind = "document"`; it overrides a
+  model's process / input_output guess.
+- Free-standing ink blocks (`Detection.blobs`) measure frameless nodes.
+
+**Schema** (`models/diagram.py`)
+- `ShapeType.DOCUMENT` (Word `flowChartDocument`, PPTX `FLOWCHART_DOCUMENT`;
+  router follows the preset's Bézier wave, `app/core/shape_geometry.py`).
+- `ShapeType.EXIT`: zero-size open arrow end; snapped to the nearest free
+  end of an original line; edges into it are freeform lines.
+- `DiagramNode.framed` (frameless formula → borderless text box, model box
+  re-measured on ink blocks; exact mode only needs FRAMED symbols matched).
+- `DiagramNode.latex`, `_{…}`/`^{…}` markup in text and titles
+  (`app/core/rich_text.py`): DOCX gets OMML equations and vertAlign runs,
+  PPTX linear runs with baseline sub/superscripts.
+- `DiagramGraph.title_below` (caption after the drawing).
+
+**Topology rules** (`postprocess.topology_problems`): document needs 1 out;
+exit ≥ 1 in / 0 out; a fragment without a start terminator may leave its
+first symbol unentered; self-loops are reported. Evidence: the old rules
+made the corrective retry invent `P*2 → P*3` and a `P*3` self-loop.
+
+**Router** (`layout_boxes.py`)
+- Crossings landing on a grid vertex were never charged (strict bounds on
+  both steps) — the cause of the Word crossing; now half-open.
+- Soft clearance (12 px) to unrelated symbols and parallel lines; crossing
+  400; leaving a decision on another side than seen 250.
+- Rip-up/re-route: each round applies the single cheapest fix that reduces
+  conflicts.
+- An arrow drawn onto the connector just outside a side is evidence for
+  that side's centre (loops land on the incoming connector like the source).
+- Uniform scale is capped so the drawing fits a page at full size; text room
+  is extra per-node width; spacing is added only where a gap is too tight
+  (cuts that also move the original lines); a widened symbol pushes an
+  original line running beside it outward.
+
+**Prompt**: document vs parallelogram, never invent text, keep line breaks
+(`\n`), broken "ə" glyphs, ignore margin numbers, arrow ending on a connector
+targets that connector's destination, exit nodes, fragments, frameless
+formulas, sub/superscript markup, LaTeX for formulas, caption position.
+
+**Verification**: 474 offline tests; all 4 originals: exact geometry, zero
+`quality_issues`, compared visually in Word and PowerPoint. The real-model
+check (`scripts/live_check.py --all-samples`, 4 calls, ≤ 8 with retries) is
+pending approval.

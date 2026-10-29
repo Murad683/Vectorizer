@@ -19,8 +19,8 @@ _BACK_EDGE_OFFSET = 50.0  # how far right of the columns a loop is routed
 
 def _shape_svg(node: LayoutedNode) -> str:
     """Return the SVG element for the node's flowchart symbol."""
-    if node.shape_type == ShapeType.EXIT:
-        return ""  # an open arrow end is not drawn
+    if node.shape_type == ShapeType.EXIT or not node.framed:
+        return ""  # an open arrow end / a frameless formula has no outline
     x, y, w, h = node.x, node.y, node.width, node.height
     style = 'fill="white" stroke="black" stroke-width="1.5"'
     if node.shape_type == ShapeType.TERMINATOR:

@@ -49,6 +49,13 @@ class DiagramNode(BaseModel):
             "if the symbol has one; null otherwise."
         ),
     )
+    framed: bool = Field(
+        default=True,
+        description=(
+            "False when this node is drawn WITHOUT any outline (e.g. a bare "
+            "formula that arrows point to); it is then rendered as text only."
+        ),
+    )
     box_2d: list[int] | None = Field(
         default=None,
         description=(

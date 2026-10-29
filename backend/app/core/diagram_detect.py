@@ -69,6 +69,10 @@ class Detection:
     shapes: list[DetectedShape] = field(default_factory=list)
     # Straight connector segments (x0, y0, x1, y1), original-image pixels.
     segments: list[tuple[float, float, float, float]] = field(default_factory=list)
+    # Ink outside every symbol and connector, merged into word/line blocks
+    # (x0, y0, x1, y1), original-image pixels: frameless formulas, branch
+    # labels, margin numbers, captions. Used to measure frameless nodes.
+    blobs: list[tuple[float, float, float, float]] = field(default_factory=list)
 
 
 def _binarise(gray: _Image) -> _Image:
@@ -312,6 +316,61 @@ def _find_segments(
     return segs
 
 
+def _find_text_blobs(
+    ink: _Image,
+    shapes: list[_Shape],
+    segments: list[tuple[float, float, float, float]],
+) -> list[tuple[int, int, int, int]]:
+    """Blocks of free-standing ink (text, formulas) in work px.
+
+    Symbols (with their text) and connector lines are erased; what is left
+    is merged with a wide, short dilation so the characters of one line —
+    or of a stacked fraction — form one block.
+    """
+    free = ink.copy()
+    zones = []
+    for x, y, w, h, _, _ in shapes:
+        pad = 9
+        zone = (max(x - pad, 0), max(y - pad, 0), x + w + pad, y + h + pad)
+        free[zone[1] : zone[3], zone[0] : zone[2]] = 0
+        zones.append(zone)
+    for x0, y0, x1, y1 in segments:
+        cv2.line(free, (int(x0), int(y0)), (int(x1), int(y1)), 0, thickness=9)
+    # Short connector stubs (too short to be guide segments) still run into
+    # a symbol: erase straight runs that end at a symbol's erased zone, so
+    # an arrow leaving a frameless formula is not counted as its ink.
+    for kernel in ((1, 15), (15, 1)):
+        runs = cv2.morphologyEx(
+            free, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, kernel)
+        )
+        m, rlab, rstats, _ = cv2.connectedComponentsWithStats(runs, connectivity=8)
+        for i in range(1, m):
+            x, y, w, h, _ = (int(v) for v in rstats[i])
+            if any(
+                x - 4 < z[2] and z[0] < x + w + 4 and y - 4 < z[3] and z[1] < y + h + 4
+                for z in zones
+            ):
+                free[y : y + h, x : x + w][rlab[y : y + h, x : x + w] == i] = 0
+    merged = cv2.dilate(free, np.ones((11, 17), np.uint8))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(merged, connectivity=8)
+    blobs: list[tuple[int, int, int, int]] = []
+    for i in range(1, n):
+        x, y, w, h, _ = (int(v) for v in stats[i])
+        part = free[y : y + h, x : x + w] * (lab[y : y + h, x : x + w] == i)
+        ys, xs = np.nonzero(part)
+        if len(xs) < 30:
+            continue  # specks, arrowhead remnants
+        blobs.append(
+            (
+                x + int(xs.min()),
+                y + int(ys.min()),
+                x + int(xs.max()) + 1,
+                y + int(ys.max()) + 1,
+            )
+        )
+    return blobs
+
+
 def detect(image: bytes) -> Detection | None:
     """Measure symbols and connector lines; None if the image can't be read."""
     data = np.frombuffer(image, dtype=np.uint8)
@@ -329,6 +388,7 @@ def detect(image: bytes) -> Detection | None:
         ink,
     )
     segments = _find_segments(ink, shapes)
+    blobs = _find_text_blobs(ink, shapes, segments)
 
     def back(v: float) -> float:
         return v / factor
@@ -348,6 +408,7 @@ def detect(image: bytes) -> Detection | None:
     detection.segments = [
         (back(a), back(b), back(c), back(d)) for a, b, c, d in segments
     ]
+    detection.blobs = [(back(a), back(b), back(c), back(d)) for a, b, c, d in blobs]
     logger.info(
         "Detected %d shapes, %d guide segments", len(detection.shapes), len(segments)
     )
@@ -393,7 +454,10 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
     """Replace the LLM's guessed node boxes with measured ones, via marks.
 
     Every node whose ``mark`` names a detected shape gets that shape's exact
-    box. Only when ALL symbols are matched (one-to-one) is the graph flagged
+    box. A frameless node (``framed=False``, e.g. a bare formula) has no
+    outline to detect: its model box is re-measured on the free-standing
+    ink blocks instead. When ALL framed symbols are matched (one-to-one)
+    and every frameless node has a box, the graph is flagged
     ``boxes_detected`` and given the original connector lines as routing
     guides; otherwise the remaining LLM boxes are kept and the layout runs
     in its tolerant (approximate-boxes) mode. Open arrow ends (``EXIT``)
@@ -404,15 +468,20 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
     w, h = float(detection.width), float(detection.height)
     used: set[int] = set()
     matched = 0
-    symbols = [n for n in graph.nodes if n.shape_type != ShapeType.EXIT]
+    unresolved = 0
     for node in graph.nodes:
         if node.shape_type == ShapeType.EXIT:
             node.mark = None
             continue
         mark = node.mark
         if mark is None or not 1 <= mark <= len(detection.shapes) or mark in used:
+            if node.framed or node.box_2d is None:
+                unresolved += 1
+            else:
+                node.box_2d = _measure_frameless(node.box_2d, detection)
             continue
         used.add(mark)
+        node.framed = True  # it has a detected outline after all
         s = detection.shapes[mark - 1]
         if s.kind == "document" and node.shape_type in (
             ShapeType.PROCESS,
@@ -429,7 +498,7 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
             round(s.x1 / w * 1000),
         ]
         matched += 1
-    if symbols and matched == len(symbols):
+    if matched and not unresolved:
         graph.boxes_detected = True
         graph.guide_segments = [
             [
@@ -440,4 +509,44 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
             ]
             for x0, y0, x1, y1 in detection.segments
         ]
-    logger.info("Marks matched %d/%d symbols to detected shapes", matched, len(symbols))
+    logger.info(
+        "Marks matched %d symbols to detected shapes, %d unresolved",
+        matched,
+        unresolved,
+    )
+
+
+def _measure_frameless(box_2d: list[int], detection: Detection) -> list[int]:
+    """Tighten a frameless node's model box onto the ink that is there.
+
+    Free ink blocks whose centre lies inside the model box are joined — a
+    formula set in a large font splits into several blocks — and the result
+    is clipped to a slightly grown model box, so a short arrow tail merged
+    into a block cannot stretch it. Margin numbers and arrow tails next to
+    the formula have their centre outside the box and are ignored. Without
+    any matching ink the model box is kept.
+    """
+    w, h = float(detection.width), float(detection.height)
+    ymin, xmin, ymax, xmax = box_2d
+    x0, y0, x1, y1 = xmin / 1000 * w, ymin / 1000 * h, xmax / 1000 * w, ymax / 1000 * h
+    gx, gy = 0.1 * (x1 - x0), 0.2 * (y1 - y0)
+    sel = (x0 - gx, y0 - gy, x1 + gx, y1 + gy)
+    picked = [
+        b
+        for b in detection.blobs
+        if x0 <= (b[0] + b[2]) / 2 <= x1 and y0 <= (b[1] + b[3]) / 2 <= y1
+    ]
+    if not picked:
+        return box_2d
+    bx0 = max(min(b[0] for b in picked), sel[0])
+    by0 = max(min(b[1] for b in picked), sel[1])
+    bx1 = min(max(b[2] for b in picked), sel[2])
+    by1 = min(max(b[3] for b in picked), sel[3])
+    if bx1 <= bx0 or by1 <= by0:
+        return box_2d
+    return [
+        round(by0 / h * 1000),
+        round(bx0 / w * 1000),
+        round(by1 / h * 1000),
+        round(bx1 / w * 1000),
+    ]

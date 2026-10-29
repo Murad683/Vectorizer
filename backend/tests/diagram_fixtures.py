@@ -27,6 +27,7 @@ def _graph(
     size: tuple[int, int],
     nodes: list[tuple[str, T, str, Box]],
     edges: list[DiagramEdge],
+    frameless: frozenset[str] = frozenset(),
     **extra: object,
 ) -> DiagramGraph:
     w, h = size
@@ -36,6 +37,7 @@ def _graph(
                 id=nid,
                 shape_type=shape,
                 text=text,
+                framed=nid not in frameless,
                 box_2d=[
                     round(y0 / h * 1000),
                     round(x0 / w * 1000),
@@ -115,6 +117,7 @@ def quadratic_equation() -> DiagramGraph:
             _e("n9", "n10"),
             _e("n10", "n11"),
         ],
+        frameless=frozenset({"n7", "n9"}),
     )
 
 

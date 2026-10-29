@@ -669,18 +669,22 @@ def add_diagram_to_slide(
         width_emu = _px_to_emu(node.width, scale)
         height_emu = _px_to_emu(node.height, scale)
         shape = slide.shapes.add_shape(
-            SHAPE_TYPE_TO_MSO[node.shape_type],
+            SHAPE_TYPE_TO_MSO[node.shape_type] if node.framed else MSO_SHAPE.RECTANGLE,
             Emu(offset_x_emu + int(node.x * scale * _EMU_PER_PX)),
             Emu(offset_y_emu + int(node.y * scale * _EMU_PER_PX)),
             width_emu,
             height_emu,
         )
-        if node.shape_type == ShapeType.INPUT_OUTPUT:
+        if node.shape_type == ShapeType.INPUT_OUTPUT and node.framed:
             _apply_parallelogram_geometry(shape, int(width_emu), int(height_emu))
-        shape.fill.solid()
-        shape.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-        shape.line.color.rgb = RGBColor(0x00, 0x00, 0x00)
-        shape.line.width = Pt(1.5)
+        if node.framed:
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            shape.line.color.rgb = RGBColor(0x00, 0x00, 0x00)
+            shape.line.width = Pt(1.5)
+        else:  # drawn without an outline in the source: text only
+            shape.fill.background()
+            shape.line.fill.background()
         shape.shadow.inherit = False
         text_frame = shape.text_frame
         text_frame.word_wrap = True

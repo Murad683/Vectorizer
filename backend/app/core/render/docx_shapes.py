@@ -83,21 +83,26 @@ def _shape_wsp(
         "</w:p>"
         for line in node.text.split("\n")
     )
-    if node.shape_type == ShapeType.INPUT_OUTPUT:
+    if node.shape_type == ShapeType.INPUT_OUTPUT and node.framed:
         geometry = parallelogram_geometry_xml(cx, cy)
     else:
-        prst = SHAPE_TYPE_TO_PRST[node.shape_type]
+        prst = SHAPE_TYPE_TO_PRST[node.shape_type] if node.framed else "rect"
         geometry = f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
+    if node.framed:
+        paint = (
+            '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
+            f'<a:ln w="{_LINE_WIDTH_EMU}">'
+            '<a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
+        )
+    else:  # drawn without an outline in the source: text only
+        paint = "<a:noFill/><a:ln><a:noFill/></a:ln>"
     return (
         "<wps:wsp>"
         f'<wps:cNvPr id="{shape_id}" name="node-{escape(node.id)}"/>'
         "<wps:cNvSpPr/>"
         "<wps:spPr>"
         f'<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
-        f"{geometry}"
-        '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
-        f'<a:ln w="{_LINE_WIDTH_EMU}">'
-        '<a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
+        f"{geometry}{paint}"
         "</wps:spPr>"
         f"<wps:txbx><w:txbxContent>{paragraphs}</w:txbxContent></wps:txbx>"
         '<wps:bodyPr rot="0" vert="horz" lIns="18000" tIns="18000" '

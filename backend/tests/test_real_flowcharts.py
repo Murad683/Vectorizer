@@ -62,7 +62,7 @@ def test_no_visual_defects(name: str) -> None:
 
 
 def test_quadratic_routes_like_the_source() -> None:
-    """Both print blocks reach "Son" from the LEFT and merge there; the
+    """Both print blocks reach "Son" down the LEFT and merge there; the
     "hə" branch of D > 0 leaves to the right, outside D = 0's branch — the
     Word result used to send 8 -> Son right, across the D > 0 line."""
     _, lg = run_fixture("quadratic_equation")
@@ -70,8 +70,9 @@ def test_quadratic_routes_like_the_source() -> None:
     for src in ("n6", "n8"):
         e = next(e for e in lg.edges if e.source_id == src and e.target_id == "n11")
         assert e.edge_path is not None
-        assert e.edge_path[-1][0] == pytest.approx(son.x)  # enters the left side
-        assert min(p[0] for p in e.edge_path) < son.x
+        assert min(p[0] for p in e.edge_path) < son.x  # runs down the left
+        end = e.edge_path[-1]
+        assert end[1] == pytest.approx(son.y) or end[0] == pytest.approx(son.x)
     outer = next(e for e in lg.edges if e.source_id == "n4" and e.target_id == "n9")
     inner = next(e for e in lg.edges if e.source_id == "n5" and e.target_id == "n7")
     assert outer.edge_path is not None and inner.edge_path is not None

@@ -92,6 +92,10 @@ algorithm continues outside the picture) ends at a node with shape_type \
 "exit", text "", mark null and box_2d a small box around the arrowhead tip. \
 Arrows that join one such open line share one "exit" node. Never connect \
 these arrows to some other symbol, and never add an arrow that is not drawn.
+- A formula or text that is part of the flow (arrows point to or from it) \
+but is drawn WITHOUT any outline is still a node: shape_type "process", \
+"framed": false, mark null, and box_2d tightly around its text. Every \
+symbol with an outline has "framed": true.
 - A drawing may be a fragment without "Başlanğıc"/"Son": then its first \
 symbol has no incoming arrow — that is correct, do not add one.
 - For edges leaving a DECISION (diamond) node: set "source_port" to the \

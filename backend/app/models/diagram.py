@@ -37,6 +37,14 @@ class DiagramNode(BaseModel):
     text: str = Field(
         description="Label exactly as written in the source, Azerbaijani preserved."
     )
+    box_2d: list[int] | None = Field(
+        default=None,
+        description=(
+            "Bounding box of this symbol in the source image as "
+            "[ymin, xmin, ymax, xmax], integers normalised to 0-1000 "
+            "(relative to image height / width)."
+        ),
+    )
 
 
 class DiagramEdge(BaseModel):
@@ -59,6 +67,13 @@ class DiagramEdge(BaseModel):
         description=(
             "Set by the layout engine when the target sits above the source "
             "(a loop). Renderers must route these around the main column."
+        ),
+    )
+    exact_route: bool = Field(
+        default=False,
+        description=(
+            "Set by the box-based layout engine: ``edge_path`` is the final "
+            "orthogonal route and must be drawn as-is (no connector presets)."
         ),
     )
     label_x: float | None = Field(
@@ -85,6 +100,12 @@ class DiagramGraph(BaseModel):
 
     nodes: list[DiagramNode]
     edges: list[DiagramEdge]
+    image_width: int | None = Field(
+        default=None, description="Source image width in px. Set by code; leave null."
+    )
+    image_height: int | None = Field(
+        default=None, description="Source image height in px. Set by code; leave null."
+    )
     title: str | None = Field(
         default=None,
         description=(
@@ -114,12 +135,20 @@ class LayoutedGraph(BaseModel):
     @property
     def canvas_width(self) -> float:
         """Total width needed to draw the graph, including margins."""
-        return max((n.x + n.width for n in self.nodes), default=0.0) + 40.0
+        right = max((n.x + n.width for n in self.nodes), default=0.0)
+        for e in self.edges:
+            if e.exact_route and e.edge_path:
+                right = max(right, max(p[0] for p in e.edge_path))
+        return right + 40.0
 
     @property
     def canvas_height(self) -> float:
         """Total height needed to draw the graph, including margins."""
-        return max((n.y + n.height for n in self.nodes), default=0.0) + 40.0
+        bottom = max((n.y + n.height for n in self.nodes), default=0.0)
+        for e in self.edges:
+            if e.exact_route and e.edge_path:
+                bottom = max(bottom, max(p[1] for p in e.edge_path))
+        return bottom + 40.0
 
     def node_by_id(self, node_id: str) -> LayoutedNode:
         """Return the node with the given id.

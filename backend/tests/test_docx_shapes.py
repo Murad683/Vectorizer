@@ -133,7 +133,7 @@ class TestDocxCanvas:
         for cust_geom in body.findall(".//wps:wsp/wps:spPr/a:custGeom", _NS):
             cxns = cust_geom.findall("a:cxnLst/a:cxn/a:pos", _NS)
             assert len(cxns) == 4
-            width = int(cust_geom.find("a:rect", _NS).get("r"))
+            width = int(cust_geom.find("a:pathLst/a:path", _NS).get("w"))
             top_x = int(cxns[0].get("x"))
             bottom_x = int(cxns[2].get("x"))
             assert top_x == bottom_x == width // 2

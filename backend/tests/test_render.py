@@ -138,8 +138,7 @@ class TestPptxShapes:
             assert cust_geom is not None
             cxns = cust_geom.findall("a:cxnLst/a:cxn/a:pos", ns)
             assert len(cxns) == 4
-            rect = cust_geom.find("a:rect", ns)
-            width = int(rect.get("r"))
+            width = int(cust_geom.find("a:pathLst/a:path", ns).get("w"))
             assert int(cxns[0].get("x")) == width // 2  # top
             assert int(cxns[2].get("x")) == width // 2  # bottom
 

@@ -3180,3 +3180,34 @@ Full non-DB suite: 228 baseline tests unaffected + expanded
 `test_no_diagonal.py` (176 tests: 163 passed, 13 xfailed as documented
 above, 1 xpassed since `three_way_fork` happens to pass in PPTX even
 though it's marked xfail for the DOCX-only failure).
+
+---
+
+## Phase 25 — Layout from source-image positions (replaces Graphviz as the default)
+
+**Why**: the vision model read complex flowcharts (loops, side branches)
+correctly, but the Graphviz re-flow ignored the original arrangement
+(`splines=ortho` also ignores ports), so branches/loops came out wrong.
+
+**What**:
+- `DiagramNode.box_2d` — the vision model now also returns each symbol's
+  bounding box (`[ymin, xmin, ymax, xmax]`, 0-1000). Same single call;
+  the provider stores the source image size in
+  `DiagramGraph.image_width/height` (needed to undo the normalisation).
+- `app/core/layout_boxes.py` — scales/snaps the boxes into aligned
+  rows/columns, spreads them until nothing touches, then routes every
+  edge as an orthogonal polyline with an A* router (bend/crossing
+  penalties; edges into the same node may merge, as in the source's
+  loop-backs; `source_port` hints are a preference, not a hard rule).
+  `layout_graph()` tries it first and falls back to Graphviz when boxes
+  are missing/invalid.
+- Edges carry `exact_route=True` + the final `edge_path`; both
+  renderers draw them as-is. A single straight segment between two
+  ordinary shapes is a real glued connector; anything with bends is an
+  editable freeform polyline with an arrowhead. Edges touching
+  parallelograms are always unglued lines (custom connection sites are
+  resolved differently by different viewers).
+- Parallelogram text rect now uses `l/t/r/b` guides (the numeric rect hid
+  the text in LibreOffice).
+- Tests: `tests/test_layout_boxes.py` (offline, hand-measured boxes — no
+  API calls).

@@ -188,6 +188,14 @@ def layout_graph(graph: DiagramGraph) -> LayoutedGraph:
     if not graph.nodes:
         return LayoutedGraph(nodes=[], edges=[])
 
+    # Prefer the source image's own arrangement when the vision model
+    # reported usable node boxes; Graphviz is the fallback.
+    from app.core.layout_boxes import layout_from_boxes
+
+    boxed = layout_from_boxes(graph)
+    if boxed is not None:
+        return boxed
+
     # Debug: dump incoming graph for diagnosis
     for n in graph.nodes:
         logger.info("GRAPH NODE %s: %s '%s'", n.id, n.shape_type, n.text)

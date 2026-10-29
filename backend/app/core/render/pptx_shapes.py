@@ -59,7 +59,7 @@ def parallelogram_geometry_xml(width_emu: int, height_emu: int) -> str:
         f'<a:cxn ang="0"><a:pos x="{w // 2}" y="{h}"/></a:cxn>'
         f'<a:cxn ang="0"><a:pos x="{w - s // 2}" y="{h // 2}"/></a:cxn>'
         "</a:cxnLst>"
-        f'<a:rect l="0" t="0" r="{w}" b="{h}"/>'
+        '<a:rect l="l" t="t" r="r" b="b"/>'
         "<a:pathLst>"
         f'<a:path w="{w}" h="{h}">'
         f'<a:moveTo><a:pt x="{s}" y="0"/></a:moveTo>'
@@ -527,6 +527,74 @@ _MSO_CONNECTOR_MAP: dict[str, MSO_CONNECTOR] = {
 }
 
 
+def _add_arrowhead(line_format: object) -> None:
+    """Add a triangle arrowhead at the end of a line (idempotent)."""
+    ln = line_format._get_or_add_ln()  # type: ignore[attr-defined]
+    if ln.find(qn("a:tailEnd")) is None:
+        ln.append(parse_xml(f'<a:tailEnd {nsdecls("a")} type="triangle"/>'))
+
+
+def _add_exact_edge(
+    slide: Slide,
+    edge: DiagramEdge,
+    source: Shape,
+    target: Shape,
+    source_node: LayoutedNode,
+    target_node: LayoutedNode,
+    scale: float,
+    offset_x_emu: int,
+    offset_y_emu: int,
+) -> None:
+    """Draw an edge whose final orthogonal route was computed by the layout.
+
+    A single straight segment ending exactly on two connection sites
+    becomes a real glued connector (follows the shapes when dragged);
+    anything with bends becomes an editable freeform polyline.
+    """
+    path = edge.edge_path or []
+    pts = [
+        (
+            offset_x_emu + int(x * scale * _EMU_PER_PX),
+            offset_y_emu + int(y * scale * _EMU_PER_PX),
+        )
+        for x, y in path
+    ]
+    plain = ShapeType.INPUT_OUTPUT not in (source_node.shape_type, target_node.shape_type)
+    # Parallelograms use custom connection sites that Office and other
+    # viewers resolve differently, so edges touching them are drawn as
+    # plain (unglued) lines that look identical everywhere.
+    if len(path) == 2 and plain:
+        s_idx = _nearest_cxn_site(source_node, path[0][0], path[0][1])
+        e_idx = _nearest_cxn_site(target_node, path[1][0], path[1][1])
+        sx, sy = _cxn_site_pos(source_node, s_idx)
+        ex, ey = _cxn_site_pos(target_node, e_idx)
+        if (
+            abs(sx - path[0][0]) < 0.5
+            and abs(sy - path[0][1]) < 0.5
+            and abs(ex - path[1][0]) < 0.5
+            and abs(ey - path[1][1]) < 0.5
+        ):
+            connector = slide.shapes.add_connector(
+                MSO_CONNECTOR.STRAIGHT, Emu(0), Emu(0), Emu(0), Emu(0)
+            )
+            connector.begin_connect(source, s_idx)
+            connector.end_connect(target, e_idx)
+            connector.line.width = Pt(1.5)
+            connector.line.color.rgb = RGBColor(0, 0, 0)
+            _add_arrowhead(connector.line)
+            connector.name = f"edge-{edge.source_id}-{edge.target_id}"
+            return
+    builder = slide.shapes.build_freeform(pts[0][0], pts[0][1], scale=1.0)
+    builder.add_line_segments(pts[1:], close=False)
+    shape = builder.convert_to_shape()
+    shape.fill.background()
+    shape.line.width = Pt(1.5)
+    shape.line.color.rgb = RGBColor(0, 0, 0)
+    shape.shadow.inherit = False
+    _add_arrowhead(shape.line)
+    shape.name = f"edge-{edge.source_id}-{edge.target_id}"
+
+
 def add_diagram_to_slide(
     graph: LayoutedGraph,
     slide: Slide,
@@ -601,6 +669,15 @@ def add_diagram_to_slide(
             continue
         source_node = graph.node_by_id(edge.source_id)
         target_node = graph.node_by_id(edge.target_id)
+
+        if edge.exact_route and edge.edge_path and len(edge.edge_path) >= 2:
+            _add_exact_edge(
+                slide, edge, source, target, source_node, target_node,
+                scale, offset_x_emu, offset_y_emu,
+            )
+            if edge.label:
+                _add_edge_label(slide, edge, scale, offset_x_emu, offset_y_emu)
+            continue
 
         # Back-edges and forward edges both route through Graphviz's own
         # collision-free ortho path (edge.edge_path) via the same

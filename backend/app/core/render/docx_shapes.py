@@ -138,6 +138,37 @@ def _connector_wsp(
     )
 
 
+def _freeform_wsp(
+    shape_id: int, name: str, pts: list[tuple[int, int]]
+) -> str:
+    """An open, fill-less polyline (custom geometry) with an arrowhead."""
+    min_x = min(p[0] for p in pts)
+    min_y = min(p[1] for p in pts)
+    w = max(max(p[0] for p in pts) - min_x, 1)
+    h = max(max(p[1] for p in pts) - min_y, 1)
+    rel = [(p[0] - min_x, p[1] - min_y) for p in pts]
+    path = f'<a:moveTo><a:pt x="{rel[0][0]}" y="{rel[0][1]}"/></a:moveTo>' + "".join(
+        f'<a:lnTo><a:pt x="{x}" y="{y}"/></a:lnTo>' for x, y in rel[1:]
+    )
+    return (
+        "<wps:wsp>"
+        f'<wps:cNvPr id="{shape_id}" name="{escape(name)}"/>'
+        "<wps:cNvSpPr/>"
+        "<wps:spPr>"
+        f'<a:xfrm><a:off x="{min_x}" y="{min_y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm>'
+        "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>"
+        '<a:rect l="0" t="0" r="r" b="b"/>'
+        f'<a:pathLst><a:path w="{w}" h="{h}" fill="none">{path}</a:path></a:pathLst>'
+        "</a:custGeom><a:noFill/>"
+        f'<a:ln w="{_LINE_WIDTH_EMU}">'
+        '<a:solidFill><a:srgbClr val="000000"/></a:solidFill>'
+        '<a:tailEnd type="triangle"/></a:ln>'
+        "</wps:spPr>"
+        "<wps:bodyPr/>"
+        "</wps:wsp>"
+    )
+
+
 def _label_wsp(
     label: str, shape_id: int, x: int, y: int, cx: int, cy: int, font_pt: int
 ) -> str:
@@ -190,6 +221,17 @@ def _cxn_site_pos_docx(
         return node.x, cy
     else:
         return node.x + node.width, cy
+
+
+def _nearest_site_docx(node: LayoutedNode, pt: list[float]) -> int:
+    """Index of the connection site closest to ``pt``."""
+    return min(
+        (_CXN_TOP, _CXN_LEFT, _CXN_BOTTOM, _CXN_RIGHT),
+        key=lambda i: (
+            (_cxn_site_pos_docx(node, i)[0] - pt[0]) ** 2
+            + (_cxn_site_pos_docx(node, i)[1] - pt[1]) ** 2
+        ),
+    )
 
 
 def add_diagram_to_docx(
@@ -262,6 +304,47 @@ def add_diagram_to_docx(
         target = graph.node_by_id(edge.target_id)
         source_id = ids_by_node[edge.source_id]
         target_id = ids_by_node[edge.target_id]
+
+        if edge.exact_route and edge.edge_path and len(edge.edge_path) >= 2:
+            path = edge.edge_path
+            glued = False
+            plain = ShapeType.INPUT_OUTPUT not in (source.shape_type, target.shape_type)
+            if len(path) == 2 and plain:
+                s_idx = _nearest_site_docx(source, path[0])
+                e_idx = _nearest_site_docx(target, path[1])
+                sx, sy = _cxn_site_pos_docx(source, s_idx)
+                ex, ey = _cxn_site_pos_docx(target, e_idx)
+                glued = (
+                    abs(sx - path[0][0]) < 0.5 and abs(sy - path[0][1]) < 0.5
+                    and abs(ex - path[1][0]) < 0.5 and abs(ey - path[1][1]) < 0.5
+                )
+            name = f"edge-{edge.source_id}-{edge.target_id}"
+            if glued:
+                x, y, w, h, flip = _segment(sx, sy, ex, ey)
+                children.append(
+                    _connector_wsp(
+                        shape_id=next_id, name=name, prst="straightConnector1",
+                        x=emu(x), y=emu(y), cx=emu(w), cy=emu(h), flip=flip,
+                        start=(source_id, s_idx), end=(target_id, e_idx),
+                    )
+                )
+            else:
+                children.append(
+                    _freeform_wsp(
+                        next_id, name, [(emu(px), emu(py)) for px, py in path]
+                    )
+                )
+            next_id += 1
+            if edge.label and edge.label_x is not None and edge.label_y is not None:
+                children.append(
+                    _label_wsp(
+                        edge.label, next_id, emu(edge.label_x), emu(edge.label_y),
+                        emu(_LABEL_WIDTH_PX), emu(_LABEL_HEIGHT_PX),
+                        max(int(12 * scale) - 1, 8),
+                    )
+                )
+                next_id += 1
+            continue
 
         # Back-edges and forward edges both route through Graphviz's own
         # collision-free ortho path (edge.edge_path) via the same

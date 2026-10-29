@@ -10,6 +10,7 @@ import math
 
 from PIL import Image, ImageDraw, ImageFont
 
+from app.core.rich_text import display_text
 from app.core.shape_geometry import document_outline
 from app.models.diagram import LayoutedGraph, LayoutedNode, ShapeType
 
@@ -58,7 +59,7 @@ def render_png(graph: LayoutedGraph, zoom: float = 2.0) -> bytes:
         cx, cy = node.x + node.width / 2, node.y + node.height / 2
         draw.multiline_text(
             z((cx, cy)),
-            node.text,
+            display_text(node.text, node.latex),
             fill="black",
             font=text_font,
             anchor="mm",

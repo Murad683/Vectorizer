@@ -18,6 +18,13 @@ from pptx.shapes.connector import Connector
 from pptx.slide import Slide
 from pptx.util import Emu, Pt
 
+from app.core.rich_text import (
+    LatexError,
+    Run,
+    display_lines,
+    latex_runs,
+    markup_runs,
+)
 from app.core.shape_geometry import DOCUMENT_TEXT_BOTTOM
 from app.models.diagram import DiagramEdge, LayoutedGraph, LayoutedNode, ShapeType
 
@@ -98,15 +105,14 @@ def _font_size_for(node: LayoutedNode, scale: float) -> Pt:
     """Pick a font size that fits the node's text into its (scaled) box."""
     size = int(_FONT_SIZE.pt * scale)
     approx_char_px = 0.66
-    lines = node.text.split("\n")
-    longest = max(len(line) for line in lines)
+    longest, n_lines = display_lines(node.text, node.latex)
     # Text height in px: lines x line pitch (1.2 em; 1 pt = 4/3 px).
     usable_h = node.height * scale * 0.85
     if node.shape_type == ShapeType.DOCUMENT:
         usable_h *= DOCUMENT_TEXT_BOTTOM  # the wave is not part of the text area
     while size > int(_MIN_FONT_SIZE.pt):
         fits_w = longest * size * approx_char_px <= node.width * scale
-        fits_h = len(lines) * size * 1.2 * 4 / 3 <= usable_h
+        fits_h = n_lines * size * 1.2 * 4 / 3 <= usable_h
         if fits_w and fits_h:
             break
         size -= 1
@@ -563,6 +569,25 @@ def _add_arrowhead(line_format: object) -> None:
         ln.append(parse_xml(f'<a:tailEnd {nsdecls("a")} type="triangle"/>'))
 
 
+def _line_runs(node: LayoutedNode) -> list[list[Run]]:
+    """Runs per paragraph: a formula as one linear line with real sub- and
+    superscripts (PowerPoint has no native equation API here), else the text
+    lines with their markup."""
+    if node.latex:
+        try:
+            return [latex_runs(node.latex)]
+        except LatexError:
+            logger.warning("Unsupported formula %r; using its text", node.latex)
+    return [markup_runs(line) or [("", None)] for line in node.text.split("\n")]
+
+
+def set_vertical_align(run: object, vert: str | None) -> None:
+    """Subscript / superscript a python-pptx run (DrawingML baseline)."""
+    if vert:
+        rpr = run.font._rPr  # type: ignore[attr-defined]
+        rpr.set("baseline", "-25000" if vert == "sub" else "30000")
+
+
 def _add_freeform_edge(
     slide: Slide,
     edge: DiagramEdge,
@@ -688,17 +713,22 @@ def add_diagram_to_slide(
         shape.shadow.inherit = False
         text_frame = shape.text_frame
         text_frame.word_wrap = True
+        if not node.framed:
+            text_frame.margin_left = text_frame.margin_right = 0
+            text_frame.margin_top = text_frame.margin_bottom = 0
         text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
         font_size = _font_size_for(node, scale)
-        for i, line in enumerate(node.text.split("\n")):
+        for i, line_runs in enumerate(_line_runs(node)):
             paragraph = (
                 text_frame.paragraphs[0] if i == 0 else text_frame.add_paragraph()
             )
             paragraph.alignment = PP_ALIGN.CENTER
-            run = paragraph.add_run()
-            run.text = line
-            run.font.size = font_size
-            run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+            for chunk, vert in line_runs:
+                run = paragraph.add_run()
+                run.text = chunk
+                run.font.size = font_size
+                run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+                set_vertical_align(run, vert)
         shapes_by_id[node.id] = shape
 
     # Precompute every node's and label's layout-px box once, so a

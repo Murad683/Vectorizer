@@ -111,8 +111,11 @@ def test_frameless_node_is_text_only_in_docx_and_pptx() -> None:
     prs = Presentation()
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_diagram_to_slide(lg, slide, max_width_emu=Inches(9), max_height_emu=Inches(7))
-    texts = {s.text_frame.text: s for s in slide.shapes if s.has_text_frame}
-    formula = texts["x = -b / 2a"]
+    formula = next(
+        s
+        for s in slide.shapes
+        if s.has_text_frame and s.text_frame.text == "x = (-b)/(2a)"
+    )
     assert formula.line.fill.type == 5  # MSO_FILL.BACKGROUND: no outline
 
 

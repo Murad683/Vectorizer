@@ -27,7 +27,8 @@ from pptx.text.text import _Paragraph
 from pptx.util import Inches, Pt
 
 from app.core.layout import layout_graph
-from app.core.render.pptx_shapes import add_diagram_to_slide
+from app.core.render.pptx_shapes import add_diagram_to_slide, set_vertical_align
+from app.core.rich_text import markup_runs
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
@@ -280,9 +281,11 @@ def _add_heading(cursor: _SlideCursor, heading: str) -> None:
     )
     frame = box.text_frame
     frame.word_wrap = True
-    run = frame.paragraphs[0].add_run()
-    run.text = heading
-    run.font.size = _FONT_SIZE
+    for chunk, vert in markup_runs(heading):
+        run = frame.paragraphs[0].add_run()
+        run.text = chunk
+        run.font.size = _FONT_SIZE
+        set_vertical_align(run, vert)
     cursor.advance(height_in)
 
 

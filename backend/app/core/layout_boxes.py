@@ -28,6 +28,7 @@ import logging
 import statistics
 from dataclasses import dataclass
 
+from app.core.rich_text import display_lines
 from app.core.shape_geometry import DOCUMENT_TEXT_BOTTOM, document_bottom
 from app.models.diagram import (
     DiagramEdge,
@@ -68,6 +69,9 @@ _RENDER_LABEL_W = 60.0  # label box width used by the renderers
 _SNAP_APPROX = 0.2
 _SNAP_EXACT = 0.1
 _MAX_TEXT_UPSCALE = 2.5
+# Drawing height (layout px, ~96 dpi) that still fits a portrait page at
+# full size; DOCX diagrams are capped at 7.5 in.
+_PAGE_CANVAS_H = 640.0
 
 # N, E, S, W as (dx, dy); layout px have a top-left origin.
 _DIRS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
@@ -119,15 +123,21 @@ _SHAPE_MIN = {
 }
 
 
-def _min_size(text: str, shape: str) -> tuple[float, float]:
+def _min_size(
+    text: str, shape: str, latex: str | None = None, framed: bool = True
+) -> tuple[float, float]:
     """Smallest comfortable size for the node's text at 12 pt."""
     base_w, base_h = _SHAPE_MIN[shape]
-    lines = text.split("\n")
-    needed = max(len(line) for line in lines) * 8.0 + 30.0
-    height = base_h + (len(lines) - 1) * 16.0
+    longest, n_lines = display_lines(text, latex)
+    if not framed:
+        # Bare text: hug it, so arrows end at the text, not in empty space.
+        # A stacked fraction (with a root sign above it) needs ~2.5 lines.
+        return longest * 8.0 + 6.0, 26.0 + (n_lines - 1) * 30.0
+    needed = longest * 8.0 + 30.0
+    height = base_h + (n_lines - 1) * 16.0
     if shape == "decision":
         needed *= 1.6  # text must fit inside the diamond's inner area
-        height += (len(lines) - 1) * 16.0
+        height += (n_lines - 1) * 16.0
     elif shape == "document":
         height /= DOCUMENT_TEXT_BOTTOM  # text sits above the wave
     return max(base_w, needed), height
@@ -263,15 +273,24 @@ def _place_nodes(
     scale = _TARGET_NODE_WIDTH / median_w
     if exact:
         # One uniform scale large enough that every node's text fits in
-        # its ORIGINAL proportions (no per-node growth → nothing collides).
+        # its ORIGINAL proportions (no per-node growth → nothing collides),
+        # but not so large that the drawing outgrows a page's height: the
+        # page would shrink it again, below a readable font size. Text that
+        # still needs room gets it as extra WIDTH per node (pages are wider
+        # than flowcharts); the cuts below keep neighbours apart.
         need = max(
             max(
-                _min_size(n.text, n.shape_type.value)[0] / raw[n.id][2],
-                _min_size(n.text, n.shape_type.value)[1] / raw[n.id][3],
+                _min_size(n.text, n.shape_type.value, n.latex, n.framed)[0]
+                / raw[n.id][2],
+                _min_size(n.text, n.shape_type.value, n.latex, n.framed)[1]
+                / raw[n.id][3],
             )
             for n in symbols
         )
-        scale = min(max(scale, need), scale * _MAX_TEXT_UPSCALE)
+        top = min(raw[n.id][1] for n in symbols)
+        bottom = max(raw[n.id][1] + raw[n.id][3] for n in symbols)
+        fit_page = _PAGE_CANVAS_H / max(bottom - top, 1.0)
+        scale = min(max(scale, need), scale * _MAX_TEXT_UPSCALE, max(scale, fit_page))
 
     ids = [n.id for n in graph.nodes]
     cxs, cys, ws, hs = [], [], [], []
@@ -283,7 +302,7 @@ def _place_nodes(
             cxs.append(x * scale)
             cys.append(y * scale)
             continue
-        mw, mh = _min_size(node.text, node.shape_type.value)
+        mw, mh = _min_size(node.text, node.shape_type.value, node.latex, node.framed)
         ws.append(max(w * scale, mw))
         hs.append(max(h * scale, mh))
         cxs.append((x + w / 2) * scale)
@@ -338,27 +357,91 @@ def _place_nodes(
 
     boxes: dict[str, _Box] = {}
     gap = _NODE_GAP_EXACT if exact else _NODE_GAP_APPROX
-    mx, my = sum(cxs) / len(cxs), sum(cys) / len(cys)
-    spread = 1.0
-    for _ in range(20):
+    # Make room only where it is missing: each too-tight gap between two
+    # symbols gets exactly the space it lacks, inserted as a cut — every
+    # coordinate beyond the cut (symbols AND original lines) moves by that
+    # amount. Spacious parts keep the source proportions, so the drawing
+    # does not grow (and shrink on the page) more than its text requires.
+    cuts: list[tuple[int, float, float]] = []  # (axis 0=x / 1=y, at, extra)
+
+    def shift(v: float, axis: int) -> float:
+        for cut_axis, at, extra in cuts:
+            if cut_axis == axis and v > at:
+                v += extra
+        return v
+
+    def build() -> list[_Box]:
         for i, nid in enumerate(ids):
-            cx = mx + (cxs[i] - mx) * spread
-            cy = my + (cys[i] - my) * spread
-            boxes[nid] = _Box(cx - ws[i] / 2, cy - hs[i] / 2, ws[i], hs[i])
-        items = [b for nid, b in boxes.items() if nid not in points]
-        if not any(
-            _too_close(items[i], items[j], gap)
-            for i in range(len(items))
-            for j in range(i + 1, len(items))
-        ):
+            boxes[nid] = _Box(cxs[i] - ws[i] / 2, cys[i] - hs[i] / 2, ws[i], hs[i])
+        return [boxes[nid] for nid in ids if nid not in points]
+
+    for _ in range(4 * len(ids)):
+        items = build()
+        worst: tuple[float, int, float] | None = None  # (deficit, axis, at)
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                a, c = items[i], items[j]
+                if not _too_close(a, c, gap):
+                    continue
+                h_overlap = a.x < c.x + c.w and c.x < a.x + a.w
+                v_overlap = a.y < c.y + c.h and c.y < a.y + a.h
+                if h_overlap != v_overlap:
+                    vertical = h_overlap  # stacked -> open a vertical gap
+                else:
+                    vertical = abs(c.cy - a.cy) >= abs(c.cx - a.cx)
+                if vertical:
+                    lo, hi = (a, c) if a.cy <= c.cy else (c, a)
+                    deficit = gap - (hi.y - (lo.y + lo.h))
+                    mid, c0, c1, axis = (lo.y + lo.h + hi.y) / 2, lo.cy, hi.cy, 1
+                else:
+                    lo, hi = (a, c) if a.cx <= c.cx else (c, a)
+                    deficit = gap - (hi.x - (lo.x + lo.w))
+                    mid, c0, c1, axis = (lo.x + lo.w + hi.x) / 2, lo.cx, hi.cx, 0
+                if c1 - c0 < 0.02:
+                    continue  # concentric: nothing a cut can separate
+                # The cut must separate the two centres so only one side moves.
+                at = min(max(mid, c0 + 0.01), c1 - 0.01)
+                if deficit > 0.5 and (worst is None or deficit > worst[0]):
+                    worst = (deficit, axis, at)
+        # A symbol that grew for its text must not swallow an original line
+        # running past it (e.g. a branch line beside a widened formula):
+        # push the line out with a cut between the symbol's centre and it.
+        for nb in items:
+            for axis, lines in ((0, vert), (1, horiz)):
+                for pos, l0, l1 in lines:
+                    p = shift(pos, axis)
+                    a0, a1 = shift(l0, 1 - axis), shift(l1, 1 - axis)
+                    span0, span1 = (
+                        (nb.y, nb.y + nb.h) if axis == 0 else (nb.x, nb.x + nb.w)
+                    )
+                    if min(a1, span1) - max(a0, span0) < 0.3 * (span1 - span0):
+                        continue  # the line does not run alongside this symbol
+                    start, size, centre = (
+                        (nb.x, nb.w, nb.cx) if axis == 0 else (nb.y, nb.h, nb.cy)
+                    )
+                    if p > centre:  # line right of / below the centre: move it out
+                        deficit = start + size + gap - p
+                        at = max(p - 0.01, centre + 0.01)
+                    else:  # line left of / above: move the symbol away from it
+                        deficit = p + gap - start
+                        at = min(p + 0.01, centre - 0.01)
+                    if deficit > 0.5 and (worst is None or deficit > worst[0]):
+                        worst = (deficit, axis, at)
+        if worst is None:
             break
-        spread *= 1.12
+        extra, axis, at = worst[0] + 0.5, worst[1], worst[2]
+        coords = cxs if axis == 0 else cys
+        for i in range(len(coords)):
+            if coords[i] > at:
+                coords[i] += extra
+        cuts.append((axis, at, extra))
+    build()
 
     def sx(v: float) -> float:
-        return mx + (v - mx) * spread
+        return shift(v, 0)
 
     def sy(v: float) -> float:
-        return my + (v - my) * spread
+        return shift(v, 1)
 
     guides: list[Segment] = [(sx(x), sy(a), sx(x), sy(b)) for x, a, b in vert]
     guides += [(sx(a), sy(y), sx(b), sy(y)) for y, a, b in horiz]

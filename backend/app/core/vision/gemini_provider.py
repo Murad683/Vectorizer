@@ -72,6 +72,14 @@ slanted sides = "input_output", straight = "process".
 - "text" is the label EXACTLY as written, in Azerbaijani. Do not translate, \
 do not compute, do not complete. When the label is on several lines inside \
 the symbol, keep each line and join them with "\\n".
+- Subscripts and superscripts in "text" (and in "title") are written as \
+_{...} and ^{...}: "X_{1}, X_{2}, ... X_{20}", "b^{2}". Digits printed on the normal \
+baseline stay plain.
+- When a node's label is a mathematical formula with a fraction, a root \
+or sub/superscripts (e.g. a stacked fraction like −b over 2a), ALSO give \
+it in "latex", using only \\frac, \\sqrt, _, ^, \\text, \\cdot, \\le, \
+\\ge, \\ne, \\ldots: "x = \\frac{-b}{2a}". Keep "text" as a readable \
+one-line version ("x = -b / 2a"). "latex" is null for ordinary labels.
 - A symbol that is EMPTY in the image gets "text": "" (empty string). If \
 some characters are unreadable, write only what is readable. Never invent \
 text that is not printed in the image (e.g. never fill an empty box with \

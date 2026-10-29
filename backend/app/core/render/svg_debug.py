@@ -8,6 +8,7 @@ natively editable shapes (PPTX now, DOCX in Phase 4).
 import html
 import logging
 
+from app.core.rich_text import display_text
 from app.core.shape_geometry import document_outline
 from app.models.diagram import DiagramEdge, LayoutedGraph, LayoutedNode, ShapeType
 
@@ -47,7 +48,7 @@ def _shape_svg(node: LayoutedNode) -> str:
 def _text_svg(node: LayoutedNode) -> str:
     """Return the centred label for a node."""
     cx = node.x + node.width / 2
-    lines = node.text.split("\n")
+    lines = display_text(node.text, node.latex).split("\n")
     top = node.y + node.height / 2 - (len(lines) - 1) * _FONT_SIZE * 0.6
     spans = "".join(
         f'<tspan x="{cx}" y="{top + i * _FONT_SIZE * 1.2}">{html.escape(line)}</tspan>'

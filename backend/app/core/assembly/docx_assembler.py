@@ -18,6 +18,7 @@ from docx.text.paragraph import Paragraph
 
 from app.core.layout import layout_graph
 from app.core.render.docx_shapes import add_diagram_to_docx
+from app.core.rich_text import markup_runs
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
@@ -119,7 +120,7 @@ def _add_vision_element(
     graph = result.diagram_graph
     if graph is not None and graph.edges:
         if graph.title and not graph.title_below:
-            document.add_paragraph().add_run(graph.title)
+            _add_rich_paragraph(document, graph.title)
         layouted = layout_graph(graph)
         add_diagram_to_docx(
             layouted,
@@ -130,7 +131,7 @@ def _add_vision_element(
         )
         _flow_text_around(document)
         if graph.title and graph.title_below:
-            document.add_paragraph().add_run(graph.title)
+            _add_rich_paragraph(document, graph.title)
         return
 
     logger.warning(
@@ -139,6 +140,18 @@ def _add_vision_element(
         result.error or "degenerate content",
     )
     document.add_picture(BytesIO(image), width=Inches(4.5))
+
+
+def _add_rich_paragraph(document: Document, text: str) -> None:
+    """A paragraph honouring _{...}/^{...} markup as sub/superscript runs."""
+    paragraph = document.add_paragraph()
+    for chunk, vert in markup_runs(text):
+        run = paragraph.add_run(chunk)
+        # Both flags share one w:vertAlign element: set only the one needed.
+        if vert == "sub":
+            run.font.subscript = True
+        elif vert == "sup":
+            run.font.superscript = True
 
 
 def _remove_table_borders(table) -> None:  # noqa: ANN001

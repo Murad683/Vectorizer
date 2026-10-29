@@ -28,6 +28,7 @@ def _graph(
     nodes: list[tuple[str, T, str, Box]],
     edges: list[DiagramEdge],
     frameless: frozenset[str] = frozenset(),
+    latex: dict[str, str] | None = None,
     **extra: object,
 ) -> DiagramGraph:
     w, h = size
@@ -37,6 +38,7 @@ def _graph(
                 id=nid,
                 shape_type=shape,
                 text=text,
+                latex=(latex or {}).get(nid),
                 framed=nid not in frameless,
                 box_2d=[
                     round(y0 / h * 1000),
@@ -98,7 +100,7 @@ def quadratic_equation() -> DiagramGraph:
             (
                 "n10",
                 T.DOCUMENT,
-                "x1 və x2-nin qiymətlərinin\nçap edilməsi",
+                "x_{1} və x_{2}-nin qiymətlərinin\nçap edilməsi",
                 (120, 478, 301, 528),
             ),
             ("n11", T.TERMINATOR, "Son", (120, 562, 301, 587)),
@@ -118,6 +120,12 @@ def quadratic_equation() -> DiagramGraph:
             _e("n10", "n11"),
         ],
         frameless=frozenset({"n7", "n9"}),
+        latex={
+            "n7": r"x = \frac{-b}{2a}",
+            "n9": (
+                r"x_1 = \frac{-b + \sqrt{D}}{2a}, \quad x_2 = \frac{-b - \sqrt{D}}{2a}"
+            ),
+        },
     )
 
 
@@ -175,7 +183,7 @@ def sum_loop() -> DiagramGraph:
             (
                 "n2",
                 T.INPUT_OUTPUT,
-                "X1, X2, ... X20 ədədlərinin\ndaxil edilməsi",
+                "X_{1}, X_{2}, ... X_{20} ədədlərinin\ndaxil edilməsi",
                 (95, 75, 273, 118),
             ),
             ("n3", T.PROCESS, "S = 0", (103, 129, 265, 151)),
@@ -203,7 +211,7 @@ def sum_loop() -> DiagramGraph:
             _e("n8", "n9"),
         ],
         title=(
-            "Sxem 3. S = x1 + x2 + ... + x20 cəminin hesablanması "
+            "Sxem 3. S = x_{1} + x_{2} + ... + x_{20} cəminin hesablanması "
             "alqoritminin blok-sxemi."
         ),
         title_below=True,

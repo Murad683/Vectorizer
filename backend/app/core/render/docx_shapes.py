@@ -33,6 +33,7 @@ from app.core.render.pptx_shapes import (
     choose_connector_from_path,
     parallelogram_geometry_xml,
 )
+from app.core.rich_text import M_NS, LatexError, latex_to_omml, markup_runs
 from app.models.diagram import LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ _NS_WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 _NS_WPC = "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
 _NSDECL = (
     f'xmlns:w="{_NS_W}" xmlns:wp="{_NS_WP}" xmlns:a="{_NS_A}" '
-    f'xmlns:wps="{_NS_WPS}" xmlns:wpc="{_NS_WPC}"'
+    f'xmlns:wps="{_NS_WPS}" xmlns:wpc="{_NS_WPC}" xmlns:m="{M_NS}"'
 )
 
 SHAPE_TYPE_TO_PRST: dict[ShapeType, str] = {
@@ -74,15 +75,7 @@ def _shape_wsp(
     font_pt: int,
 ) -> str:
     """A wps:wsp autoshape with a real, editable centred text box."""
-    sz_half_pt = font_pt * 2
-    paragraphs = "".join(
-        "<w:p>"
-        '<w:pPr><w:spacing w:after="0"/><w:jc w:val="center"/></w:pPr>'
-        f'<w:r><w:rPr><w:sz w:val="{sz_half_pt}"/><w:szCs w:val="{sz_half_pt}"/>'
-        f'</w:rPr><w:t xml:space="preserve">{escape(line)}</w:t></w:r>'
-        "</w:p>"
-        for line in node.text.split("\n")
-    )
+    paragraphs = _text_paragraphs(node.text, node.latex, font_pt * 2)
     if node.shape_type == ShapeType.INPUT_OUTPUT and node.framed:
         geometry = parallelogram_geometry_xml(cx, cy)
     else:
@@ -96,6 +89,8 @@ def _shape_wsp(
         )
     else:  # drawn without an outline in the source: text only
         paint = "<a:noFill/><a:ln><a:noFill/></a:ln>"
+    # Without a frame no inset is needed: give a bare formula the full width.
+    ins = 18000 if node.framed else 0
     return (
         "<wps:wsp>"
         f'<wps:cNvPr id="{shape_id}" name="node-{escape(node.id)}"/>'
@@ -105,10 +100,43 @@ def _shape_wsp(
         f"{geometry}{paint}"
         "</wps:spPr>"
         f"<wps:txbx><w:txbxContent>{paragraphs}</w:txbxContent></wps:txbx>"
-        '<wps:bodyPr rot="0" vert="horz" lIns="18000" tIns="18000" '
-        'rIns="18000" bIns="18000" anchor="ctr" anchorCtr="0">'
+        f'<wps:bodyPr rot="0" vert="horz" lIns="{ins}" tIns="{ins}" '
+        f'rIns="{ins}" bIns="{ins}" anchor="ctr" anchorCtr="0">'
         "<a:noAutofit/></wps:bodyPr>"
         "</wps:wsp>"
+    )
+
+
+def _text_runs(text: str, half_points: int, italic: bool = False) -> str:
+    """WordprocessingML runs for one line, honouring _{...}/^{...} markup."""
+    out = []
+    for chunk, vert in markup_runs(text):
+        va = {"sub": "subscript", "sup": "superscript"}.get(vert or "")
+        props = (
+            ("<w:i/>" if italic else "")
+            + (f'<w:vertAlign w:val="{va}"/>' if va else "")
+            + f'<w:sz w:val="{half_points}"/><w:szCs w:val="{half_points}"/>'
+        )
+        out.append(
+            f"<w:r><w:rPr>{props}</w:rPr>"
+            f'<w:t xml:space="preserve">{escape(chunk)}</w:t></w:r>'
+        )
+    return "".join(out) or (
+        f'<w:r><w:rPr><w:sz w:val="{half_points}"/></w:rPr><w:t></w:t></w:r>'
+    )
+
+
+def _text_paragraphs(text: str, latex: str | None, half_points: int) -> str:
+    """Centred paragraphs: a real Word equation for a formula node, else one
+    paragraph per text line with sub/superscript runs."""
+    ppr = '<w:pPr><w:spacing w:after="0"/><w:jc w:val="center"/></w:pPr>'
+    if latex:
+        try:
+            return f"<w:p>{ppr}{latex_to_omml(latex, half_points)}</w:p>"
+        except LatexError:
+            logger.warning("Unsupported formula %r; using its text", latex)
+    return "".join(
+        f"<w:p>{ppr}{_text_runs(line, half_points)}</w:p>" for line in text.split("\n")
     )
 
 

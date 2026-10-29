@@ -42,6 +42,14 @@ class DiagramNode(BaseModel):
     text: str = Field(
         description="Label exactly as written in the source, Azerbaijani preserved."
     )
+    latex: str | None = Field(
+        default=None,
+        description=(
+            "When the label is a mathematical formula with fractions, roots, "
+            "sub- or superscripts: the same formula in LaTeX (e.g. "
+            "'x = \\frac{-b}{2a}'), rendered as a real equation. Null otherwise."
+        ),
+    )
     mark: int | None = Field(
         default=None,
         description=(

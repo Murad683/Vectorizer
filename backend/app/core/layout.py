@@ -19,6 +19,7 @@ import re
 
 import graphviz
 
+from app.core.rich_text import display_lines
 from app.models.diagram import (
     DiagramEdge,
     DiagramGraph,
@@ -65,9 +66,9 @@ def _node_size_inches(node: DiagramNode) -> tuple[float, float]:
         ShapeType.TERMINATOR: (140.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
     }
     w_default, h_default = defaults[node.shape_type]
-    lines = node.text.split("\n")
-    w_needed = max(len(line) for line in lines) * char_width + text_pad
-    h_needed = h_default + (len(lines) - 1) * 16.0 / _LAYOUT_DPI
+    longest, n_lines = display_lines(node.text, node.latex)
+    w_needed = longest * char_width + text_pad
+    h_needed = h_default + (n_lines - 1) * 16.0 / _LAYOUT_DPI
     return max(w_default, w_needed), h_needed
 
 

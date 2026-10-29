@@ -3183,31 +3183,47 @@ though it's marked xfail for the DOCX-only failure).
 
 ---
 
-## Phase 25 — Layout from source-image positions (replaces Graphviz as the default)
+## Phase 25 — Image-measured geometry + layout from source positions
 
-**Why**: the vision model read complex flowcharts (loops, side branches)
-correctly, but the Graphviz re-flow ignored the original arrangement
-(`splines=ortho` also ignores ports), so branches/loops came out wrong.
+**Why**: the vision model reads text and topology well, but (a) the
+Graphviz re-flow ignored the original arrangement (`splines=ortho` also
+ignores ports), and (b) the model's own coordinates (`box_2d`) are NOT
+reliable — on the real samples `gemini-3.1-flash-lite` boxes drifted by
+half a symbol or landed on the wrong symbol.
 
-**What**:
-- `DiagramNode.box_2d` — the vision model now also returns each symbol's
-  bounding box (`[ymin, xmin, ymax, xmax]`, 0-1000). Same single call;
-  the provider stores the source image size in
-  `DiagramGraph.image_width/height` (needed to undo the normalisation).
-- `app/core/layout_boxes.py` — scales/snaps the boxes into aligned
-  rows/columns, spreads them until nothing touches, then routes every
-  edge as an orthogonal polyline with an A* router (bend/crossing
-  penalties; edges into the same node may merge, as in the source's
-  loop-backs; `source_port` hints are a preference, not a hard rule).
-  `layout_graph()` tries it first and falls back to Graphviz when boxes
-  are missing/invalid.
-- Edges carry `exact_route=True` + the final `edge_path`; both
-  renderers draw them as-is. A single straight segment between two
-  ordinary shapes is a real glued connector; anything with bends is an
-  editable freeform polyline with an arrowhead. Edges touching
-  parallelograms are always unglued lines (custom connection sites are
-  resolved differently by different viewers).
-- Parallelogram text rect now uses `l/t/r/b` guides (the numeric rect hid
-  the text in LibreOffice).
-- Tests: `tests/test_layout_boxes.py` (offline, hand-measured boxes — no
-  API calls).
+**Pipeline now** (still ONE vision call per image in the normal case):
+1. `app/core/diagram_detect.py` (OpenCV, no API): every closed symbol is an
+   enclosed white region → exact boxes; straight connector lines are taken
+   from ink connected to a symbol outline (titles/watermarks ignored) →
+   `guide_segments`. Adaptive threshold; only SOLID dark blocks (letterbox
+   bars) are removed — a large thin-line drawing must survive.
+2. The provider sends the original image + a copy with numbered red boxes
+   ("set-of-mark"); the model returns `mark` per node. `apply_detection`
+   swaps in the measured box for every marked node; only when ALL nodes
+   are matched one-to-one is the graph flagged `boxes_detected`.
+3. `topology_problems()` checks flowchart rules (process/IO: exactly 1
+   out-arrow, decision: 2, every non-terminator has an in-arrow). If
+   violated (seen live: the model dropped both loop-back arrows), ONE
+   corrective call lists the problems; the retry is kept only if better.
+4. `app/core/layout_boxes.py`: exact mode = one uniform scale (original
+   proportions), small snapping, ports = side midpoints + every point where
+   an original line touches a symbol; A* router where the author's lines
+   cost 5% (corners on them nearly free), so routes reproduce the source.
+   Edges into the same node may merge; two exits from one point are
+   effectively forbidden. Labels are placed last on the first free spot
+   (no node / line / label collision); labels left of a line are
+   right-aligned (`label_align_right`). Approximate mode (model boxes only)
+   and Graphviz (no boxes) remain as fallbacks.
+5. Renderers: straight segment between two ordinary shapes = glued
+   connector; anything else (and anything touching a parallelogram) =
+   editable freeform polyline with arrowhead. Parallelogram text rect uses
+   `l/t/r/b` guides.
+
+**Validation** (`tests/test_diagram_detect.py`, `tests/test_layout_boxes.py`):
+real samples → all symbols detected, zero overlaps by `quality_issues()`.
+Offline stress (25 topologies drawn by Graphviz as "scans"): detection
+25/25; 21/25 with zero overlaps, 4 with one defect each (Graphviz-style
+drawings where arrows leave diamonds mid-edge).
+
+**Dependencies**: `opencv-python-headless`, `numpy==2.2.6` (numpy ≥2.3
+needs Python 3.12; CI/Docker use 3.11).

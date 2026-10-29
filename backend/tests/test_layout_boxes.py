@@ -15,25 +15,37 @@ from app.models.diagram import (
     DiagramGraph,
     DiagramNode,
     LayoutedGraph,
+)
+from app.models.diagram import (
     PortSide as P,
+)
+from app.models.diagram import (
     ShapeType as T,
 )
 
 
-def _node(nid: str, shape: T, text: str, box: tuple[int, int, int, int],
-          size: tuple[int, int]) -> DiagramNode:
+def _node(
+    nid: str, shape: T, text: str, box: tuple[int, int, int, int], size: tuple[int, int]
+) -> DiagramNode:
     """``box`` is pixel (x0, y0, x1, y1) in an image of ``size`` (w, h)."""
     w, h = size
     x0, y0, x1, y1 = box
     return DiagramNode(
-        id=nid, shape_type=shape, text=text,
-        box_2d=[round(y0 / h * 1000), round(x0 / w * 1000),
-                round(y1 / h * 1000), round(x1 / w * 1000)],
+        id=nid,
+        shape_type=shape,
+        text=text,
+        box_2d=[
+            round(y0 / h * 1000),
+            round(x0 / w * 1000),
+            round(y1 / h * 1000),
+            round(x1 / w * 1000),
+        ],
     )
 
 
-def _edge(s: str, t: str, label: str | None = None,
-          port: P | None = None) -> DiagramEdge:
+def _edge(
+    s: str, t: str, label: str | None = None, port: P | None = None
+) -> DiagramEdge:
     return DiagramEdge(source_id=s, target_id=t, label=label, source_port=port)
 
 
@@ -41,7 +53,8 @@ def _edge(s: str, t: str, label: str | None = None,
 def euclid() -> DiagramGraph:
     sz = (399, 500)
     return DiagramGraph(
-        image_width=sz[0], image_height=sz[1],
+        image_width=sz[0],
+        image_height=sz[1],
         nodes=[
             _node("n1", T.TERMINATOR, "Başlanğıc", (128, 82, 190, 107), sz),
             _node("n2", T.INPUT_OUTPUT, "a,b", (127, 123, 185, 155), sz),
@@ -55,11 +68,17 @@ def euclid() -> DiagramGraph:
             _node("n10", T.TERMINATOR, "Son", (262, 365, 322, 390), sz),
         ],
         edges=[
-            _edge("n1", "n2"), _edge("n2", "n3"), _edge("n3", "n4"),
-            _edge("n4", "n8", "Hə", P.RIGHT), _edge("n4", "n5", "Yox", P.BOTTOM),
-            _edge("n5", "n6", "Hə", P.LEFT), _edge("n5", "n7", "Yox", P.RIGHT),
-            _edge("n6", "n4"), _edge("n7", "n4"),
-            _edge("n8", "n9"), _edge("n9", "n10"),
+            _edge("n1", "n2"),
+            _edge("n2", "n3"),
+            _edge("n3", "n4"),
+            _edge("n4", "n8", "Hə", P.RIGHT),
+            _edge("n4", "n5", "Yox", P.BOTTOM),
+            _edge("n5", "n6", "Hə", P.LEFT),
+            _edge("n5", "n7", "Yox", P.RIGHT),
+            _edge("n6", "n4"),
+            _edge("n7", "n4"),
+            _edge("n8", "n9"),
+            _edge("n9", "n10"),
         ],
     )
 
@@ -68,7 +87,8 @@ def euclid() -> DiagramGraph:
 def loop_chart() -> DiagramGraph:
     sz = (1944, 1904)
     return DiagramGraph(
-        image_width=sz[0], image_height=sz[1],
+        image_width=sz[0],
+        image_height=sz[1],
         nodes=[
             _node("n1", T.TERMINATOR, "Başlanğıc", (675, 105, 1205, 270), sz),
             _node("n2", T.INPUT_OUTPUT, "n", (695, 395, 1185, 530), sz),
@@ -80,9 +100,13 @@ def loop_chart() -> DiagramGraph:
             _node("n8", T.PROCESS, "a = a + 16", (1393, 1598, 1812, 1780), sz),
         ],
         edges=[
-            _edge("n1", "n2"), _edge("n2", "n3"), _edge("n3", "n4"),
-            _edge("n4", "n5", "Yox", P.LEFT), _edge("n5", "n6"),
-            _edge("n4", "n7", "Hə", P.RIGHT), _edge("n7", "n8"),
+            _edge("n1", "n2"),
+            _edge("n2", "n3"),
+            _edge("n3", "n4"),
+            _edge("n4", "n5", "Yox", P.LEFT),
+            _edge("n5", "n6"),
+            _edge("n4", "n7", "Hə", P.RIGHT),
+            _edge("n7", "n8"),
             _edge("n8", "n4"),
         ],
     )
@@ -93,15 +117,17 @@ def _assert_valid(lg: LayoutedGraph) -> None:
     for e in lg.edges:
         assert e.exact_route and e.edge_path and len(e.edge_path) >= 2
         path = e.edge_path
-        for p, q in zip(path, path[1:]):
+        for p, q in zip(path, path[1:], strict=False):
             # Only axis-aligned segments, never diagonal.
             assert abs(p[0] - q[0]) < 0.01 or abs(p[1] - q[1]) < 0.01
             lo_x, hi_x = min(p[0], q[0]), max(p[0], q[0])
             lo_y, hi_y = min(p[1], q[1]), max(p[1], q[1])
             for n in lg.nodes:
                 inside = (
-                    lo_x < n.x + n.width and hi_x > n.x
-                    and lo_y < n.y + n.height and hi_y > n.y
+                    lo_x < n.x + n.width
+                    and hi_x > n.x
+                    and lo_y < n.y + n.height
+                    and hi_y > n.y
                 )
                 if n.id in (e.source_id, e.target_id):
                     continue  # own endpoints touch the border
@@ -166,7 +192,8 @@ def test_degenerate_box_returns_none(euclid: DiagramGraph) -> None:
 def test_self_loop_does_not_crash() -> None:
     sz = (400, 400)
     g = DiagramGraph(
-        image_width=400, image_height=400,
+        image_width=400,
+        image_height=400,
         nodes=[_node("n1", T.PROCESS, "x = x + 1", (100, 100, 220, 150), sz)],
         edges=[_edge("n1", "n1")],
     )

@@ -15,11 +15,21 @@ from PIL import Image
 from pydantic import ValidationError
 
 from app.config import get_settings
+from app.core.diagram_detect import Detection, annotate, apply_detection, detect
 from app.core.vision.base import VisionProvider
 from app.models.diagram import DiagramGraph
 from app.models.document import ContentType, VisionAnalysis, VisionResult
 
 logger = logging.getLogger(__name__)
+
+_MARKS_PROMPT = """
+A SECOND image is attached: the same picture with the automatically \
+detected flowchart symbols outlined in red, each with a red number tag at \
+its top-left corner. For every node set "mark" to the number of the red \
+outline around that symbol. If a symbol has no red outline, set "mark" to \
+null (and still give its box_2d). Never give two nodes the same mark. The \
+marks are only for identification; read the text from the FIRST image.
+"""
 
 _MAX_RETRIES = 2
 _RETRY_DELAY_SECONDS = 2.0
@@ -79,6 +89,13 @@ Leave "diagram" null in this case.
 """
 
 
+def _mime_type(image: bytes) -> str:
+    """Best-effort MIME type from the file signature."""
+    if image[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    return "image/png"
+
+
 def _is_transient(exc: Exception) -> bool:
     """Return True for errors worth retrying (rate limits, 5xx, network)."""
     if isinstance(exc, genai_errors.APIError):
@@ -131,6 +148,37 @@ def parse_vision_analysis(raw_output: str) -> VisionAnalysis | None:
     return analysis
 
 
+def topology_problems(graph: DiagramGraph) -> list[str]:
+    """Structural rules every flowchart obeys; violations mean the model
+    missed or invented arrows (most often a loop-back arrow)."""
+    outs: dict[str, int] = {n.id: 0 for n in graph.nodes}
+    ins: dict[str, int] = {n.id: 0 for n in graph.nodes}
+    for e in graph.edges:
+        if e.source_id in outs:
+            outs[e.source_id] += 1
+        if e.target_id in ins:
+            ins[e.target_id] += 1
+    problems: list[str] = []
+    for n in graph.nodes:
+        label = f'"{n.text}" ({n.id})'
+        kind = n.shape_type.value
+        if kind in ("process", "input_output") and outs[n.id] != 1:
+            problems.append(
+                f"{label} is a {kind} symbol with {outs[n.id]} outgoing arrows; "
+                "it must have exactly 1 (check loop-back arrows)"
+            )
+        elif kind == "decision" and outs[n.id] != 2:
+            problems.append(
+                f"{label} is a decision with {outs[n.id]} outgoing arrows; "
+                "it must have exactly 2"
+            )
+        elif kind == "terminator" and outs[n.id] + ins[n.id] == 0:
+            problems.append(f"{label} has no arrows at all")
+        if kind != "terminator" and ins[n.id] == 0:
+            problems.append(f"{label} has no incoming arrow")
+    return problems
+
+
 class GeminiVisionProvider(VisionProvider):
     """Diagram analysis backed by the Google Gemini API (JSON mode)."""
 
@@ -148,6 +196,30 @@ class GeminiVisionProvider(VisionProvider):
             http_options=genai_types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
         )
 
+    def _retry_topology(
+        self, contents: list[str | genai_types.Part], problems: list[str]
+    ) -> VisionAnalysis | None:
+        """Single corrective call listing what was structurally wrong."""
+        fix = (
+            "\nYour previous answer for this image was incomplete:\n- "
+            + "\n- ".join(problems)
+            + "\nLook at every arrow again, especially arrows that go back up "
+            "to an earlier symbol, and answer again with ALL arrows."
+        )
+        try:
+            response = self._client.models.generate_content(
+                model=self._model_name,
+                contents=[*contents[:-1], str(contents[-1]) + fix],  # type: ignore[arg-type]
+                config=self._config,
+            )
+        except Exception:  # noqa: BLE001 - keep the first answer
+            logger.exception("Topology retry failed")
+            return None
+        analysis = parse_vision_analysis(response.text or "")
+        if analysis is None or analysis.content_type != ContentType.DIAGRAM:
+            return None
+        return analysis
+
     def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
         """Classify the image and extract it in ONE call.
 
@@ -156,15 +228,28 @@ class GeminiVisionProvider(VisionProvider):
         ``content_type`` selects ``diagram_graph`` or ``text_content``.
         """
         prompt = _PROMPT
+        detection: Detection | None = None
+        try:
+            detection = detect(image)
+        except Exception:  # noqa: BLE001 - geometry is an optional refinement
+            logger.exception("Shape detection failed; using model boxes only")
+        marked: bytes | None = None
+        if detection is not None and len(detection.shapes) >= 2:
+            marked = annotate(image, detection)
+            prompt += _MARKS_PROMPT
         if context:
             prompt += (
                 "\nSurrounding text from the source document (for context "
                 f"only, do not add it to the output):\n{context}"
             )
         contents: list[str | genai_types.Part] = [
-            genai_types.Part.from_bytes(data=image, mime_type="image/png"),
-            prompt,
+            genai_types.Part.from_bytes(data=image, mime_type=_mime_type(image)),
         ]
+        if marked is not None:
+            contents.append(
+                genai_types.Part.from_bytes(data=marked, mime_type="image/png")
+            )
+        contents.append(prompt)
 
         last_error: Exception | None = None
         raw_output = ""
@@ -222,9 +307,27 @@ class GeminiVisionProvider(VisionProvider):
                 ),
             )
 
+        if analysis.content_type == ContentType.DIAGRAM and analysis.diagram:
+            problems = topology_problems(analysis.diagram)
+            if problems:
+                # One targeted re-ask (only when the answer is provably
+                # incomplete, e.g. a loop-back arrow was left out).
+                logger.warning("Diagram topology incomplete: %s", "; ".join(problems))
+                retry = self._retry_topology(contents, problems)
+                if retry is not None and retry.diagram is not None:
+                    still = topology_problems(retry.diagram)
+                    if len(still) < len(problems):
+                        analysis, raw_output = retry, retry.model_dump_json()
+                        if still:
+                            logger.warning(
+                                "Topology still incomplete: %s", "; ".join(still)
+                            )
+
         note = f"Generated by {self._model_name}."
         if analysis.content_type == ContentType.DIAGRAM:
-            if analysis.diagram is not None:
+            if analysis.diagram is not None and detection is not None and marked:
+                apply_detection(analysis.diagram, detection)
+            elif analysis.diagram is not None:
                 # box_2d is normalised; the layout needs the aspect ratio.
                 try:
                     with Image.open(io.BytesIO(image)) as img:

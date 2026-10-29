@@ -11,6 +11,7 @@ from app.core.vision.gemini_provider import (
     GeminiVisionProvider,
     parse_diagram_graph,
     parse_vision_analysis,
+    topology_problems,
 )
 from app.models.diagram import ShapeType
 from app.models.document import ContentType
@@ -24,6 +25,7 @@ _GRAPH_DICT = {
     "edges": [
         {"source_id": "n1", "target_id": "n2", "label": ""},
         {"source_id": "n2", "target_id": "n3", "label": "Yox"},
+        {"source_id": "n2", "target_id": "n3", "label": "Hə"},
     ],
 }
 _VALID_GRAPH_JSON = json.dumps(_GRAPH_DICT)
@@ -251,3 +253,84 @@ def test_missing_api_key_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) 
             GeminiVisionProvider()
     finally:
         get_settings.cache_clear()
+
+
+_MISSING_LOOP_JSON = json.dumps(
+    {
+        "content_type": "diagram",
+        "diagram": {
+            "nodes": [
+                {"id": "n1", "shape_type": "terminator", "text": "Başlanğıc"},
+                {"id": "n2", "shape_type": "decision", "text": "a < 5"},
+                {"id": "n3", "shape_type": "process", "text": "a = a + 1"},
+                {"id": "n4", "shape_type": "terminator", "text": "Son"},
+            ],
+            "edges": [
+                {"source_id": "n1", "target_id": "n2"},
+                {"source_id": "n2", "target_id": "n3", "label": "Hə"},
+                {"source_id": "n2", "target_id": "n4", "label": "Yox"},
+            ],
+        },
+    }
+)
+_WITH_LOOP_JSON = json.dumps(
+    {
+        "content_type": "diagram",
+        "diagram": {
+            **json.loads(_MISSING_LOOP_JSON)["diagram"],
+            "edges": [
+                *json.loads(_MISSING_LOOP_JSON)["diagram"]["edges"],
+                {"source_id": "n3", "target_id": "n2"},
+            ],
+        },
+    }
+)
+
+
+def test_topology_problems_flags_missing_loop_back() -> None:
+    analysis = parse_vision_analysis(_MISSING_LOOP_JSON)
+    assert analysis is not None and analysis.diagram is not None
+    problems = topology_problems(analysis.diagram)
+    assert len(problems) == 1 and "a = a + 1" in problems[0]
+    fixed = parse_vision_analysis(_WITH_LOOP_JSON)
+    assert fixed is not None and fixed.diagram is not None
+    assert topology_problems(fixed.diagram) == []
+
+
+class TestTopologyRetry:
+    def test_incomplete_graph_gets_one_corrective_call(
+        self, provider: GeminiVisionProvider
+    ) -> None:
+        provider._client.models.generate_content.side_effect = [
+            _response_with_text(_MISSING_LOOP_JSON),
+            _response_with_text(_WITH_LOOP_JSON),
+        ]
+        result = provider.analyze_diagram(b"png-bytes")
+        assert result.diagram_graph is not None
+        assert len(result.diagram_graph.edges) == 4
+        assert provider._client.models.generate_content.call_count == 2
+        retry_prompt = provider._client.models.generate_content.call_args.kwargs[
+            "contents"
+        ][-1]
+        assert "a = a + 1" in retry_prompt
+
+    def test_worse_retry_keeps_first_answer(
+        self, provider: GeminiVisionProvider
+    ) -> None:
+        provider._client.models.generate_content.side_effect = [
+            _response_with_text(_MISSING_LOOP_JSON),
+            _response_with_text(_MISSING_LOOP_JSON),
+        ]
+        result = provider.analyze_diagram(b"png-bytes")
+        assert result.diagram_graph is not None
+        assert len(result.diagram_graph.edges) == 3
+        assert provider._client.models.generate_content.call_count == 2
+
+    def test_complete_graph_makes_no_extra_call(
+        self, provider: GeminiVisionProvider
+    ) -> None:
+        provider._client.models.generate_content.side_effect = [
+            _response_with_text(_WITH_LOOP_JSON),
+        ]
+        provider.analyze_diagram(b"png-bytes")
+        assert provider._client.models.generate_content.call_count == 1

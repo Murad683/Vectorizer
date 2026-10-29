@@ -484,6 +484,9 @@ def _add_edge_label(
     frame.margin_right = 0
     frame.margin_top = 0
     frame.margin_bottom = 0
+    frame.word_wrap = True
+    if edge.label_align_right:
+        frame.paragraphs[0].alignment = PP_ALIGN.RIGHT
     run = frame.paragraphs[0].add_run()
     run.text = edge.label
     run.font.size = Pt(max(int(_FONT_SIZE.pt * scale) - 1, int(_MIN_FONT_SIZE.pt)))

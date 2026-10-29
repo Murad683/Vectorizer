@@ -170,10 +170,12 @@ def _freeform_wsp(
 
 
 def _label_wsp(
-    label: str, shape_id: int, x: int, y: int, cx: int, cy: int, font_pt: int
+    label: str, shape_id: int, x: int, y: int, cx: int, cy: int, font_pt: int,
+    align_right: bool = False,
 ) -> str:
     """A borderless, fill-less text box holding an edge label."""
     sz_half_pt = font_pt * 2
+    jc = '<w:jc w:val="right"/>' if align_right else ""
     return (
         "<wps:wsp>"
         f'<wps:cNvPr id="{shape_id}" name="label-{shape_id}"/>'
@@ -184,7 +186,7 @@ def _label_wsp(
         "<a:noFill/><a:ln><a:noFill/></a:ln>"
         "</wps:spPr>"
         "<wps:txbx><w:txbxContent><w:p>"
-        '<w:pPr><w:spacing w:after="0"/></w:pPr>'
+        f'<w:pPr><w:spacing w:after="0"/>{jc}</w:pPr>'
         f'<w:r><w:rPr><w:i/><w:sz w:val="{sz_half_pt}"/>'
         f'<w:szCs w:val="{sz_half_pt}"/></w:rPr>'
         f'<w:t xml:space="preserve">{escape(label)}</w:t></w:r>'
@@ -341,6 +343,7 @@ def add_diagram_to_docx(
                         edge.label, next_id, emu(edge.label_x), emu(edge.label_y),
                         emu(_LABEL_WIDTH_PX), emu(_LABEL_HEIGHT_PX),
                         max(int(12 * scale) - 1, 8),
+                        align_right=edge.label_align_right,
                     )
                 )
                 next_id += 1

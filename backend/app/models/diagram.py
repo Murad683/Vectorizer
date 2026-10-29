@@ -37,6 +37,13 @@ class DiagramNode(BaseModel):
     text: str = Field(
         description="Label exactly as written in the source, Azerbaijani preserved."
     )
+    mark: int | None = Field(
+        default=None,
+        description=(
+            "The red number drawn next to this symbol in the marked image, "
+            "if the symbol has one; null otherwise."
+        ),
+    )
     box_2d: list[int] | None = Field(
         default=None,
         description=(
@@ -76,6 +83,13 @@ class DiagramEdge(BaseModel):
             "orthogonal route and must be drawn as-is (no connector presets)."
         ),
     )
+    label_align_right: bool = Field(
+        default=False,
+        description=(
+            "Set by the layout engine: the label sits LEFT of its line, so its "
+            "text is right-aligned in the label box (grows away from the line)."
+        ),
+    )
     label_x: float | None = Field(
         default=None,
         description="Label center x in layout px, set by the layout engine.",
@@ -105,6 +119,17 @@ class DiagramGraph(BaseModel):
     )
     image_height: int | None = Field(
         default=None, description="Source image height in px. Set by code; leave null."
+    )
+    boxes_detected: bool = Field(
+        default=False,
+        description="Set by code (boxes measured from the image); leave false.",
+    )
+    guide_segments: list[list[int]] | None = Field(
+        default=None,
+        description=(
+            "Set by code: the original drawing's straight connector lines as "
+            "[x0, y0, x1, y1] normalised to 0-1000. Leave null."
+        ),
     )
     title: str | None = Field(
         default=None,

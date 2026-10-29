@@ -334,3 +334,37 @@ class TestTopologyRetry:
         ]
         provider.analyze_diagram(b"png-bytes")
         assert provider._client.models.generate_content.call_count == 1
+
+
+def test_debug_dump_records_every_artefact(
+    provider: GeminiVisionProvider, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    monkeypatch.setenv("DEBUG_DUMP_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        provider._client.models.generate_content.side_effect = [
+            _response_with_text(_MISSING_LOOP_JSON),
+            _response_with_text(_WITH_LOOP_JSON),
+        ]
+        provider.analyze_diagram(b"png-bytes")
+    finally:
+        get_settings.cache_clear()
+    (folder,) = list(tmp_path.iterdir())
+    names = {p.name for p in folder.iterdir()}
+    assert {"image.png", "prompt.txt", "response.json", "retry.json"} <= names
+    assert {"meta.json", "graph.json"} <= names
+    meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+    assert meta["retry_kept"] is True
+    assert (folder / "response.json").read_text(encoding="utf-8") == _MISSING_LOOP_JSON
+
+
+def test_debug_dump_is_off_by_default(
+    provider: GeminiVisionProvider, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEBUG_DUMP_DIR", raising=False)
+    provider._client.models.generate_content.return_value = _response_with_text(
+        _VALID_ANALYSIS_JSON
+    )
+    provider.analyze_diagram(b"png-bytes")
+    assert list(tmp_path.iterdir()) == []

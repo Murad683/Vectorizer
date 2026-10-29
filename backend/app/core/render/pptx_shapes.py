@@ -18,6 +18,14 @@ from pptx.shapes.connector import Connector
 from pptx.slide import Slide
 from pptx.util import Emu, Pt
 
+from app.core.rich_text import (
+    LatexError,
+    Run,
+    display_lines,
+    latex_runs,
+    markup_runs,
+)
+from app.core.shape_geometry import DOCUMENT_TEXT_BOTTOM
 from app.models.diagram import DiagramEdge, LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -27,6 +35,7 @@ SHAPE_TYPE_TO_MSO: dict[ShapeType, MSO_SHAPE] = {
     ShapeType.PROCESS: MSO_SHAPE.RECTANGLE,
     ShapeType.DECISION: MSO_SHAPE.DIAMOND,
     ShapeType.INPUT_OUTPUT: MSO_SHAPE.PARALLELOGRAM,
+    ShapeType.DOCUMENT: MSO_SHAPE.FLOWCHART_DOCUMENT,
 }
 
 # Layout px are treated as CSS px: 1 px = 9525 EMU (96 dpi).
@@ -93,11 +102,18 @@ def _px_to_emu(px: float, scale: float) -> Emu:
 
 
 def _font_size_for(node: LayoutedNode, scale: float) -> Pt:
-    """Pick a font size that fits the node's text into its (scaled) width."""
+    """Pick a font size that fits the node's text into its (scaled) box."""
     size = int(_FONT_SIZE.pt * scale)
     approx_char_px = 0.66
+    longest, n_lines = display_lines(node.text, node.latex)
+    # Text height in px: lines x line pitch (1.2 em; 1 pt = 4/3 px).
+    usable_h = node.height * scale * 0.85
+    if node.shape_type == ShapeType.DOCUMENT:
+        usable_h *= DOCUMENT_TEXT_BOTTOM  # the wave is not part of the text area
     while size > int(_MIN_FONT_SIZE.pt):
-        if len(node.text) * size * approx_char_px <= node.width * scale:
+        fits_w = longest * size * approx_char_px <= node.width * scale
+        fits_h = n_lines * size * 1.2 * 4 / 3 <= usable_h
+        if fits_w and fits_h:
             break
         size -= 1
     return Pt(max(size, int(_MIN_FONT_SIZE.pt)))
@@ -164,7 +180,9 @@ def choose_connector_from_path(
     end_idx = _nearest_cxn_site(target_node, end_pt[0], end_pt[1])
 
     bends = _enforce_no_diagonal(bends, source_node, target_node, start_idx, end_idx)
-    bends = _enforce_min_bends_for_axis(bends, source_node, target_node, start_idx, end_idx)
+    bends = _enforce_min_bends_for_axis(
+        bends, source_node, target_node, start_idx, end_idx
+    )
 
     if bends == 0:
         return "straightConnector1", start_idx, end_idx, {}, 0
@@ -194,9 +212,7 @@ def choose_connector_from_path(
     return preset, start_idx, end_idx, adjs, bends
 
 
-def _nearest_cxn_site(
-    node: LayoutedNode, px: float, py: float
-) -> int:
+def _nearest_cxn_site(node: LayoutedNode, px: float, py: float) -> int:
     """Return the connection-site index (0=top, 1=left, 2=bottom, 3=right)
     on ``node`` closest to the point ``(px, py)``."""
     cx = node.x + node.width / 2
@@ -218,12 +234,19 @@ def _nearest_cxn_site(
 
 
 _FORCED_BEND_CANDIDATE_RATIOS = (
-    50000, 25000, 75000, 10000, 90000,
+    50000,
+    25000,
+    75000,
+    10000,
+    90000,
     # Wider fallbacks: route the spine outside the direct start-end gap
     # entirely (a bigger dogleg) for cramped layouts — e.g. two nearby
     # decisions with several edge labels packed into a narrow corridor —
     # where every in-between position is occupied.
-    150000, -50000, 200000, -100000,
+    150000,
+    -50000,
+    200000,
+    -100000,
 )
 
 
@@ -383,7 +406,12 @@ def _enforce_no_diagonal(
             "Promoting 0-bend to 1-bend: connection sites differ in both "
             "x (%.1f vs %.1f, %d EMU) and y (%.1f vs %.1f, %d EMU) "
             "— straight would be diagonal",
-            sx, ex, int(dx_emu), sy, ey, int(dy_emu),
+            sx,
+            ex,
+            int(dx_emu),
+            sy,
+            ey,
+            int(dy_emu),
         )
         return 1
     return bends
@@ -446,7 +474,9 @@ def _enforce_min_bends_for_axis(
         "Promoting %d-bend to 2-bend: connection sites (%d, %d) sit "
         "on the same axis but aren't aligned — a single bend can't "
         "connect them without an invalid route",
-        bends, start_idx, end_idx,
+        bends,
+        start_idx,
+        end_idx,
     )
     return 2
 
@@ -515,7 +545,9 @@ def assert_no_diagonal_connector(
             "Diagonal invariant triggered for edge '%s': "
             "straightConnector1 with cx=%d, cy=%d — auto-correcting "
             "to bentConnector2",
-            edge_label, cx_emu, cy_emu,
+            edge_label,
+            cx_emu,
+            cy_emu,
         )
         return "bentConnector2"
     return preset
@@ -537,6 +569,51 @@ def _add_arrowhead(line_format: object) -> None:
         ln.append(parse_xml(f'<a:tailEnd {nsdecls("a")} type="triangle"/>'))
 
 
+def _line_runs(node: LayoutedNode) -> list[list[Run]]:
+    """Runs per paragraph: a formula as one linear line with real sub- and
+    superscripts (PowerPoint has no native equation API here), else the text
+    lines with their markup."""
+    if node.latex:
+        try:
+            return [latex_runs(node.latex)]
+        except LatexError:
+            logger.warning("Unsupported formula %r; using its text", node.latex)
+    return [markup_runs(line) or [("", None)] for line in node.text.split("\n")]
+
+
+def set_vertical_align(run: object, vert: str | None) -> None:
+    """Subscript / superscript a python-pptx run (DrawingML baseline)."""
+    if vert:
+        rpr = run.font._rPr  # type: ignore[attr-defined]
+        rpr.set("baseline", "-25000" if vert == "sub" else "30000")
+
+
+def _add_freeform_edge(
+    slide: Slide,
+    edge: DiagramEdge,
+    scale: float,
+    offset_x_emu: int,
+    offset_y_emu: int,
+) -> None:
+    """Draw ``edge.edge_path`` as an editable polyline with an arrowhead."""
+    pts = [
+        (
+            offset_x_emu + int(x * scale * _EMU_PER_PX),
+            offset_y_emu + int(y * scale * _EMU_PER_PX),
+        )
+        for x, y in edge.edge_path or []
+    ]
+    builder = slide.shapes.build_freeform(pts[0][0], pts[0][1], scale=1.0)
+    builder.add_line_segments(pts[1:], close=False)
+    shape = builder.convert_to_shape()
+    shape.fill.background()
+    shape.line.width = Pt(1.5)
+    shape.line.color.rgb = RGBColor(0, 0, 0)
+    shape.shadow.inherit = False
+    _add_arrowhead(shape.line)
+    shape.name = f"edge-{edge.source_id}-{edge.target_id}"
+
+
 def _add_exact_edge(
     slide: Slide,
     edge: DiagramEdge,
@@ -555,14 +632,10 @@ def _add_exact_edge(
     anything with bends becomes an editable freeform polyline.
     """
     path = edge.edge_path or []
-    pts = [
-        (
-            offset_x_emu + int(x * scale * _EMU_PER_PX),
-            offset_y_emu + int(y * scale * _EMU_PER_PX),
-        )
-        for x, y in path
-    ]
-    plain = ShapeType.INPUT_OUTPUT not in (source_node.shape_type, target_node.shape_type)
+    plain = ShapeType.INPUT_OUTPUT not in (
+        source_node.shape_type,
+        target_node.shape_type,
+    )
     # Parallelograms use custom connection sites that Office and other
     # viewers resolve differently, so edges touching them are drawn as
     # plain (unglued) lines that look identical everywhere.
@@ -587,15 +660,7 @@ def _add_exact_edge(
             _add_arrowhead(connector.line)
             connector.name = f"edge-{edge.source_id}-{edge.target_id}"
             return
-    builder = slide.shapes.build_freeform(pts[0][0], pts[0][1], scale=1.0)
-    builder.add_line_segments(pts[1:], close=False)
-    shape = builder.convert_to_shape()
-    shape.fill.background()
-    shape.line.width = Pt(1.5)
-    shape.line.color.rgb = RGBColor(0, 0, 0)
-    shape.shadow.inherit = False
-    _add_arrowhead(shape.line)
-    shape.name = f"edge-{edge.source_id}-{edge.target_id}"
+    _add_freeform_edge(slide, edge, scale, offset_x_emu, offset_y_emu)
 
 
 def add_diagram_to_slide(
@@ -606,11 +671,15 @@ def add_diagram_to_slide(
     offset_y_emu: int = 0,
     max_width_emu: int | None = None,
     max_height_emu: int | None = None,
-) -> None:
-    """Draw the layouted graph onto ``slide`` as native editable shapes."""
+) -> int:
+    """Draw the layouted graph onto ``slide`` as native editable shapes.
+
+    Returns the drawn height in EMU (0 for an empty graph), so callers can
+    place content (e.g. a caption) directly below the diagram.
+    """
     if not graph.nodes:
         logger.warning("Empty graph; nothing added to slide")
-        return
+        return 0
 
     scale = 1.0
     if max_width_emu is not None:
@@ -620,49 +689,78 @@ def add_diagram_to_slide(
 
     shapes_by_id = {}
     for node in graph.nodes:
+        if node.shape_type == ShapeType.EXIT:
+            continue  # an open arrow end is not drawn
         width_emu = _px_to_emu(node.width, scale)
         height_emu = _px_to_emu(node.height, scale)
         shape = slide.shapes.add_shape(
-            SHAPE_TYPE_TO_MSO[node.shape_type],
+            SHAPE_TYPE_TO_MSO[node.shape_type] if node.framed else MSO_SHAPE.RECTANGLE,
             Emu(offset_x_emu + int(node.x * scale * _EMU_PER_PX)),
             Emu(offset_y_emu + int(node.y * scale * _EMU_PER_PX)),
             width_emu,
             height_emu,
         )
-        if node.shape_type == ShapeType.INPUT_OUTPUT:
+        if node.shape_type == ShapeType.INPUT_OUTPUT and node.framed:
             _apply_parallelogram_geometry(shape, int(width_emu), int(height_emu))
-        shape.fill.solid()
-        shape.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-        shape.line.color.rgb = RGBColor(0x00, 0x00, 0x00)
-        shape.line.width = Pt(1.5)
+        if node.framed:
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            shape.line.color.rgb = RGBColor(0x00, 0x00, 0x00)
+            shape.line.width = Pt(1.5)
+        else:  # drawn without an outline in the source: text only
+            shape.fill.background()
+            shape.line.fill.background()
         shape.shadow.inherit = False
         text_frame = shape.text_frame
         text_frame.word_wrap = True
+        if not node.framed:
+            text_frame.margin_left = text_frame.margin_right = 0
+            text_frame.margin_top = text_frame.margin_bottom = 0
         text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
-        paragraph = text_frame.paragraphs[0]
-        paragraph.alignment = PP_ALIGN.CENTER
-        run = paragraph.add_run()
-        run.text = node.text
-        run.font.size = _font_size_for(node, scale)
-        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        font_size = _font_size_for(node, scale)
+        for i, line_runs in enumerate(_line_runs(node)):
+            paragraph = (
+                text_frame.paragraphs[0] if i == 0 else text_frame.add_paragraph()
+            )
+            paragraph.alignment = PP_ALIGN.CENTER
+            for chunk, vert in line_runs:
+                run = paragraph.add_run()
+                run.text = chunk
+                run.font.size = font_size
+                run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+                set_vertical_align(run, vert)
         shapes_by_id[node.id] = shape
 
     # Precompute every node's and label's layout-px box once, so a
     # connector that needs a bend position without real Graphviz path
     # data (see _enforce_min_bends_for_axis) can steer clear of them
     # instead of blindly bisecting onto a label.
-    node_boxes = {
-        n.id: (n.x, n.y, n.x + n.width, n.y + n.height) for n in graph.nodes
-    }
+    node_boxes = {n.id: (n.x, n.y, n.x + n.width, n.y + n.height) for n in graph.nodes}
     label_boxes = [
-        (e.label_x, e.label_y, e.label_x + _LABEL_WIDTH_PX, e.label_y + _LABEL_HEIGHT_PX)
+        (
+            e.label_x,
+            e.label_y,
+            e.label_x + _LABEL_WIDTH_PX,
+            e.label_y + _LABEL_HEIGHT_PX,
+        )
         for e in graph.edges
         if e.label and e.label_x is not None and e.label_y is not None
     ]
 
+    exit_ids = {n.id for n in graph.nodes if n.shape_type == ShapeType.EXIT}
     for edge in graph.edges:
         source = shapes_by_id.get(edge.source_id)
         target = shapes_by_id.get(edge.target_id)
+        if (
+            source is not None
+            and edge.target_id in exit_ids
+            and edge.edge_path
+            and len(edge.edge_path) >= 2
+        ):
+            _add_freeform_edge(slide, edge, scale, offset_x_emu, offset_y_emu)
+            if edge.label:
+                _add_edge_label(slide, edge, scale, offset_x_emu, offset_y_emu)
+            continue
         if source is None or target is None:
             logger.warning(
                 "Edge %s->%s references unknown node; skipped",
@@ -675,8 +773,15 @@ def add_diagram_to_slide(
 
         if edge.exact_route and edge.edge_path and len(edge.edge_path) >= 2:
             _add_exact_edge(
-                slide, edge, source, target, source_node, target_node,
-                scale, offset_x_emu, offset_y_emu,
+                slide,
+                edge,
+                source,
+                target,
+                source_node,
+                target_node,
+                scale,
+                offset_x_emu,
+                offset_y_emu,
             )
             if edge.label:
                 _add_edge_label(slide, edge, scale, offset_x_emu, offset_y_emu)
@@ -695,16 +800,15 @@ def add_diagram_to_slide(
         # there. Graphviz's dot already routes back-edges cleanly around
         # unrelated nodes, so there is no need for a separate mechanism.
         avoid_boxes = [
-            box for nid, box in node_boxes.items()
+            box
+            for nid, box in node_boxes.items()
             if nid not in (edge.source_id, edge.target_id)
         ] + label_boxes
         preset, start_idx, end_idx, adjs, bend_count = choose_connector_from_path(
             edge.edge_path, source_node, target_node, avoid_boxes
         )
         mso_type = _MSO_CONNECTOR_MAP.get(preset, MSO_CONNECTOR.ELBOW)
-        connector = slide.shapes.add_connector(
-            mso_type, Emu(0), Emu(0), Emu(0), Emu(0)
-        )
+        connector = slide.shapes.add_connector(mso_type, Emu(0), Emu(0), Emu(0), Emu(0))
         connector.begin_connect(source, start_idx)
         connector.end_connect(target, end_idx)
 
@@ -742,3 +846,4 @@ def add_diagram_to_slide(
         len(shapes_by_id),
         len(graph.edges),
     )
+    return int(graph.canvas_height * scale * _EMU_PER_PX)

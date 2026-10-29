@@ -33,6 +33,7 @@ from app.core.render.pptx_shapes import (
     choose_connector_from_path,
     parallelogram_geometry_xml,
 )
+from app.core.rich_text import M_NS, LatexError, latex_to_omml, markup_runs
 from app.models.diagram import LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ _NS_WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 _NS_WPC = "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
 _NSDECL = (
     f'xmlns:w="{_NS_W}" xmlns:wp="{_NS_WP}" xmlns:a="{_NS_A}" '
-    f'xmlns:wps="{_NS_WPS}" xmlns:wpc="{_NS_WPC}"'
+    f'xmlns:wps="{_NS_WPS}" xmlns:wpc="{_NS_WPC}" xmlns:m="{M_NS}"'
 )
 
 SHAPE_TYPE_TO_PRST: dict[ShapeType, str] = {
@@ -53,6 +54,7 @@ SHAPE_TYPE_TO_PRST: dict[ShapeType, str] = {
     ShapeType.PROCESS: "rect",
     ShapeType.DECISION: "diamond",
     ShapeType.INPUT_OUTPUT: "parallelogram",
+    ShapeType.DOCUMENT: "flowChartDocument",
 }
 
 _EMU_PER_PX = 9525
@@ -73,32 +75,68 @@ def _shape_wsp(
     font_pt: int,
 ) -> str:
     """A wps:wsp autoshape with a real, editable centred text box."""
-    sz_half_pt = font_pt * 2
-    if node.shape_type == ShapeType.INPUT_OUTPUT:
+    paragraphs = _text_paragraphs(node.text, node.latex, font_pt * 2)
+    if node.shape_type == ShapeType.INPUT_OUTPUT and node.framed:
         geometry = parallelogram_geometry_xml(cx, cy)
     else:
-        prst = SHAPE_TYPE_TO_PRST[node.shape_type]
+        prst = SHAPE_TYPE_TO_PRST[node.shape_type] if node.framed else "rect"
         geometry = f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
+    if node.framed:
+        paint = (
+            '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
+            f'<a:ln w="{_LINE_WIDTH_EMU}">'
+            '<a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
+        )
+    else:  # drawn without an outline in the source: text only
+        paint = "<a:noFill/><a:ln><a:noFill/></a:ln>"
+    # Without a frame no inset is needed: give a bare formula the full width.
+    ins = 18000 if node.framed else 0
     return (
         "<wps:wsp>"
         f'<wps:cNvPr id="{shape_id}" name="node-{escape(node.id)}"/>'
         "<wps:cNvSpPr/>"
         "<wps:spPr>"
         f'<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
-        f"{geometry}"
-        '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
-        f'<a:ln w="{_LINE_WIDTH_EMU}">'
-        '<a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
+        f"{geometry}{paint}"
         "</wps:spPr>"
-        "<wps:txbx><w:txbxContent><w:p>"
-        '<w:pPr><w:spacing w:after="0"/><w:jc w:val="center"/></w:pPr>'
-        f'<w:r><w:rPr><w:sz w:val="{sz_half_pt}"/><w:szCs w:val="{sz_half_pt}"/>'
-        f'</w:rPr><w:t xml:space="preserve">{escape(node.text)}</w:t></w:r>'
-        "</w:p></w:txbxContent></wps:txbx>"
-        '<wps:bodyPr rot="0" vert="horz" lIns="18000" tIns="18000" '
-        'rIns="18000" bIns="18000" anchor="ctr" anchorCtr="0">'
+        f"<wps:txbx><w:txbxContent>{paragraphs}</w:txbxContent></wps:txbx>"
+        f'<wps:bodyPr rot="0" vert="horz" lIns="{ins}" tIns="{ins}" '
+        f'rIns="{ins}" bIns="{ins}" anchor="ctr" anchorCtr="0">'
         "<a:noAutofit/></wps:bodyPr>"
         "</wps:wsp>"
+    )
+
+
+def _text_runs(text: str, half_points: int, italic: bool = False) -> str:
+    """WordprocessingML runs for one line, honouring _{...}/^{...} markup."""
+    out = []
+    for chunk, vert in markup_runs(text):
+        va = {"sub": "subscript", "sup": "superscript"}.get(vert or "")
+        props = (
+            ("<w:i/>" if italic else "")
+            + (f'<w:vertAlign w:val="{va}"/>' if va else "")
+            + f'<w:sz w:val="{half_points}"/><w:szCs w:val="{half_points}"/>'
+        )
+        out.append(
+            f"<w:r><w:rPr>{props}</w:rPr>"
+            f'<w:t xml:space="preserve">{escape(chunk)}</w:t></w:r>'
+        )
+    return "".join(out) or (
+        f'<w:r><w:rPr><w:sz w:val="{half_points}"/></w:rPr><w:t></w:t></w:r>'
+    )
+
+
+def _text_paragraphs(text: str, latex: str | None, half_points: int) -> str:
+    """Centred paragraphs: a real Word equation for a formula node, else one
+    paragraph per text line with sub/superscript runs."""
+    ppr = '<w:pPr><w:spacing w:after="0"/><w:jc w:val="center"/></w:pPr>'
+    if latex:
+        try:
+            return f"<w:p>{ppr}{latex_to_omml(latex, half_points)}</w:p>"
+        except LatexError:
+            logger.warning("Unsupported formula %r; using its text", latex)
+    return "".join(
+        f"<w:p>{ppr}{_text_runs(line, half_points)}</w:p>" for line in text.split("\n")
     )
 
 
@@ -138,9 +176,7 @@ def _connector_wsp(
     )
 
 
-def _freeform_wsp(
-    shape_id: int, name: str, pts: list[tuple[int, int]]
-) -> str:
+def _freeform_wsp(shape_id: int, name: str, pts: list[tuple[int, int]]) -> str:
     """An open, fill-less polyline (custom geometry) with an arrowhead."""
     min_x = min(p[0] for p in pts)
     min_y = min(p[1] for p in pts)
@@ -170,7 +206,13 @@ def _freeform_wsp(
 
 
 def _label_wsp(
-    label: str, shape_id: int, x: int, y: int, cx: int, cy: int, font_pt: int,
+    label: str,
+    shape_id: int,
+    x: int,
+    y: int,
+    cx: int,
+    cy: int,
+    font_pt: int,
     align_right: bool = False,
 ) -> str:
     """A borderless, fill-less text box holding an edge label."""
@@ -209,9 +251,7 @@ def _segment(
     return min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0), flip
 
 
-def _cxn_site_pos_docx(
-    node: LayoutedNode, idx: int
-) -> tuple[float, float]:
+def _cxn_site_pos_docx(node: LayoutedNode, idx: int) -> tuple[float, float]:
     """Return the (x, y) position of a connection site on a node."""
     cx = node.x + node.width / 2
     cy = node.y + node.height / 2
@@ -274,6 +314,8 @@ def add_diagram_to_docx(
     children: list[str] = []
 
     for node in graph.nodes:
+        if node.shape_type == ShapeType.EXIT:
+            continue  # an open arrow end is not drawn
         ids_by_node[node.id] = next_id
         children.append(
             _shape_wsp(
@@ -292,11 +334,14 @@ def add_diagram_to_docx(
     # connector that needs a bend position without real Graphviz path
     # data (see _enforce_min_bends_for_axis) can steer clear of them
     # instead of blindly bisecting onto a label.
-    node_boxes = {
-        n.id: (n.x, n.y, n.x + n.width, n.y + n.height) for n in graph.nodes
-    }
+    node_boxes = {n.id: (n.x, n.y, n.x + n.width, n.y + n.height) for n in graph.nodes}
     label_boxes = [
-        (e.label_x, e.label_y, e.label_x + _LABEL_WIDTH_PX, e.label_y + _LABEL_HEIGHT_PX)
+        (
+            e.label_x,
+            e.label_y,
+            e.label_x + _LABEL_WIDTH_PX,
+            e.label_y + _LABEL_HEIGHT_PX,
+        )
         for e in graph.edges
         if e.label and e.label_x is not None and e.label_y is not None
     ]
@@ -304,30 +349,53 @@ def add_diagram_to_docx(
     for edge in graph.edges:
         source = graph.node_by_id(edge.source_id)
         target = graph.node_by_id(edge.target_id)
+        if source.shape_type == ShapeType.EXIT:
+            logger.warning("Edge leaves an open arrow end %s; skipped", source.id)
+            continue
         source_id = ids_by_node[edge.source_id]
-        target_id = ids_by_node[edge.target_id]
+        to_exit = target.shape_type == ShapeType.EXIT
+        if to_exit and not (edge.edge_path and len(edge.edge_path) >= 2):
+            logger.warning("Edge into open end %s has no route; skipped", target.id)
+            continue
+        target_id = 0 if to_exit else ids_by_node[edge.target_id]
 
-        if edge.exact_route and edge.edge_path and len(edge.edge_path) >= 2:
+        if (
+            (edge.exact_route or to_exit)
+            and edge.edge_path
+            and len(edge.edge_path) >= 2
+        ):
             path = edge.edge_path
             glued = False
-            plain = ShapeType.INPUT_OUTPUT not in (source.shape_type, target.shape_type)
+            plain = not to_exit and ShapeType.INPUT_OUTPUT not in (
+                source.shape_type,
+                target.shape_type,
+            )
             if len(path) == 2 and plain:
                 s_idx = _nearest_site_docx(source, path[0])
                 e_idx = _nearest_site_docx(target, path[1])
                 sx, sy = _cxn_site_pos_docx(source, s_idx)
                 ex, ey = _cxn_site_pos_docx(target, e_idx)
                 glued = (
-                    abs(sx - path[0][0]) < 0.5 and abs(sy - path[0][1]) < 0.5
-                    and abs(ex - path[1][0]) < 0.5 and abs(ey - path[1][1]) < 0.5
+                    abs(sx - path[0][0]) < 0.5
+                    and abs(sy - path[0][1]) < 0.5
+                    and abs(ex - path[1][0]) < 0.5
+                    and abs(ey - path[1][1]) < 0.5
                 )
             name = f"edge-{edge.source_id}-{edge.target_id}"
             if glued:
                 x, y, w, h, flip = _segment(sx, sy, ex, ey)
                 children.append(
                     _connector_wsp(
-                        shape_id=next_id, name=name, prst="straightConnector1",
-                        x=emu(x), y=emu(y), cx=emu(w), cy=emu(h), flip=flip,
-                        start=(source_id, s_idx), end=(target_id, e_idx),
+                        shape_id=next_id,
+                        name=name,
+                        prst="straightConnector1",
+                        x=emu(x),
+                        y=emu(y),
+                        cx=emu(w),
+                        cy=emu(h),
+                        flip=flip,
+                        start=(source_id, s_idx),
+                        end=(target_id, e_idx),
                     )
                 )
             else:
@@ -340,8 +408,12 @@ def add_diagram_to_docx(
             if edge.label and edge.label_x is not None and edge.label_y is not None:
                 children.append(
                     _label_wsp(
-                        edge.label, next_id, emu(edge.label_x), emu(edge.label_y),
-                        emu(_LABEL_WIDTH_PX), emu(_LABEL_HEIGHT_PX),
+                        edge.label,
+                        next_id,
+                        emu(edge.label_x),
+                        emu(edge.label_y),
+                        emu(_LABEL_WIDTH_PX),
+                        emu(_LABEL_HEIGHT_PX),
                         max(int(12 * scale) - 1, 8),
                         align_right=edge.label_align_right,
                     )
@@ -355,7 +427,8 @@ def add_diagram_to_docx(
         # comment in pptx_shapes.add_diagram_to_slide() for why the old
         # hand-rolled "rail" special-case for back-edges was removed.
         avoid_boxes = [
-            box for nid, box in node_boxes.items()
+            box
+            for nid, box in node_boxes.items()
             if nid not in (edge.source_id, edge.target_id)
         ] + label_boxes
         preset, start_idx, end_idx, adjs, bend_count = choose_connector_from_path(
@@ -367,7 +440,9 @@ def add_diagram_to_docx(
         x, y, w, h, flip = _segment(x0, y0, x1, y1)
 
         preset = assert_no_diagonal_connector(
-            preset, emu(w), emu(h),
+            preset,
+            emu(w),
+            emu(h),
             f"{edge.source_id}->{edge.target_id}",
         )
 

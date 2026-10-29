@@ -17,7 +17,12 @@ class ShapeType(str, Enum):
     TERMINATOR = "terminator"  # oval — Başlanğıc / Son
     PROCESS = "process"  # rectangle — assignments, actions
     DECISION = "decision"  # diamond — conditions
-    INPUT_OUTPUT = "input_output"  # parallelogram — input / print
+    INPUT_OUTPUT = "input_output"  # parallelogram — input / read
+    DOCUMENT = "document"  # rectangle with a wavy bottom — print / output ("Çap")
+    # Not a symbol: the open end of an arrow that stops in empty space (the
+    # algorithm continues outside the picture). Drawn as nothing; edges into
+    # it end in a bare arrowhead at its position.
+    EXIT = "exit"
 
 
 class PortSide(str, Enum):
@@ -37,11 +42,26 @@ class DiagramNode(BaseModel):
     text: str = Field(
         description="Label exactly as written in the source, Azerbaijani preserved."
     )
+    latex: str | None = Field(
+        default=None,
+        description=(
+            "When the label is a mathematical formula with fractions, roots, "
+            "sub- or superscripts: the same formula in LaTeX (e.g. "
+            "'x = \\frac{-b}{2a}'), rendered as a real equation. Null otherwise."
+        ),
+    )
     mark: int | None = Field(
         default=None,
         description=(
             "The red number drawn next to this symbol in the marked image, "
             "if the symbol has one; null otherwise."
+        ),
+    )
+    framed: bool = Field(
+        default=True,
+        description=(
+            "False when this node is drawn WITHOUT any outline (e.g. a bare "
+            "formula that arrows point to); it is then rendered as text only."
         ),
     )
     box_2d: list[int] | None = Field(
@@ -134,11 +154,15 @@ class DiagramGraph(BaseModel):
     title: str | None = Field(
         default=None,
         description=(
-            "A heading/title line positioned above the flowchart itself in "
-            "the source image, if any (e.g. 'Blok-sxem nəyi hesablayır?') — "
-            "distinct from any node's own label. None when the image has no "
-            "such line."
+            "A heading or caption line outside the flowchart's symbols and "
+            "arrows in the source image, if any (e.g. 'Blok-sxem nəyi "
+            "hesablayır?', 'Sxem 3. ... blok-sxemi.') — distinct from any "
+            "node's own label. None when the image has no such line."
         ),
+    )
+    title_below: bool = Field(
+        default=False,
+        description="True when the title/caption is printed BELOW the flowchart.",
     )
 
 

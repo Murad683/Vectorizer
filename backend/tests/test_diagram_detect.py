@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 
 from app.core.diagram_detect import annotate, apply_detection, detect
+from app.core.diagram_quality import quality_issues
 from app.core.layout_boxes import layout_from_boxes
 from app.models.diagram import (
     DiagramEdge,
     DiagramGraph,
     DiagramNode,
-    LayoutedGraph,
 )
 from app.models.diagram import (
     PortSide as P,
@@ -87,94 +87,6 @@ def _loop_graph() -> DiagramGraph:
             _e("n8", "n4"),
         ],
     )
-
-
-def quality_issues(lg: LayoutedGraph) -> list[str]:
-    """Every visual defect a reader would notice: lines through symbols or
-    labels, labels on symbols, lines on top of / crossing unrelated lines,
-    diagonal segments, overlapping symbols."""
-    issues: list[str] = []
-    labels = []
-    for e in lg.edges:
-        if e.label and e.label_x is not None and e.label_y is not None:
-            w = len(e.label) * 8 + 4
-            x = e.label_x + 60 - w if e.label_align_right else e.label_x
-            labels.append((e, (x, e.label_y, x + w, e.label_y + 18)))
-
-    def hits(
-        a: list[float], b: list[float], r: tuple[float, ...], pad: float = 0
-    ) -> bool:
-        return (
-            min(a[0], b[0]) < r[2] - pad
-            and max(a[0], b[0]) > r[0] + pad
-            and min(a[1], b[1]) < r[3] - pad
-            and max(a[1], b[1]) > r[1] + pad
-        )
-
-    def segs(e: DiagramEdge) -> list[tuple[list[float], list[float]]]:
-        p = e.edge_path or []
-        return list(zip(p, p[1:], strict=False))
-
-    for e in lg.edges:
-        name = f"{e.source_id}->{e.target_id}"
-        for a, b in segs(e):
-            if abs(a[0] - b[0]) > 0.5 and abs(a[1] - b[1]) > 0.5:
-                issues.append(f"diagonal {name}")
-            for n in lg.nodes:
-                if n.id not in (e.source_id, e.target_id) and hits(
-                    a, b, (n.x, n.y, n.x + n.width, n.y + n.height)
-                ):
-                    issues.append(f"{name} through node {n.id}")
-            for le, box in labels:
-                if le is not e and hits(a, b, box, 1):
-                    issues.append(f"{name} through label {le.label!r}")
-    for le, box in labels:
-        for n in lg.nodes:
-            if hits(
-                [box[0], box[1]],
-                [box[2], box[3]],
-                (n.x, n.y, n.x + n.width, n.y + n.height),
-            ):
-                issues.append(f"label {le.label!r} over node {n.id}")
-    edges = lg.edges
-    for i in range(len(edges)):
-        for j in range(i + 1, len(edges)):
-            if edges[i].target_id == edges[j].target_id:
-                continue  # arrows into the same symbol may merge
-            for a, b in segs(edges[i]):
-                for c, d in segs(edges[j]):
-                    va, vc = abs(a[0] - b[0]) < 0.5, abs(c[0] - d[0]) < 0.5
-                    if va == vc:
-                        k = 0 if va else 1
-                        if abs(a[k] - c[k]) < 1:
-                            lo = max(min(a[1 - k], b[1 - k]), min(c[1 - k], d[1 - k]))
-                            hi = min(max(a[1 - k], b[1 - k]), max(c[1 - k], d[1 - k]))
-                            if hi - lo > 1:
-                                issues.append(f"overlap {i}/{j}")
-                    else:
-                        v, h = ((a, b), (c, d)) if va else ((c, d), (a, b))
-                        x, y = v[0][0], h[0][1]
-                        if (
-                            min(h[0][0], h[1][0]) + 0.5
-                            < x
-                            < max(h[0][0], h[1][0]) - 0.5
-                            and min(v[0][1], v[1][1]) + 0.5
-                            < y
-                            < max(v[0][1], v[1][1]) - 0.5
-                        ):
-                            issues.append(f"cross {i}/{j}")
-    nodes = lg.nodes
-    for i in range(len(nodes)):
-        for j in range(i + 1, len(nodes)):
-            a, b = nodes[i], nodes[j]
-            if (
-                a.x < b.x + b.width
-                and b.x < a.x + a.width
-                and a.y < b.y + b.height
-                and b.y < a.y + a.height
-            ):
-                issues.append(f"nodes overlap {a.id} {b.id}")
-    return issues
 
 
 @pytest.mark.parametrize("path,count", [(EUCLID, 10), (LOOP, 8)])
@@ -251,8 +163,11 @@ def test_loop_follows_the_original_outer_route() -> None:
     assert lg is not None
     loop = next(e for e in lg.edges if e.source_id == "n8")
     rightmost = max(n.x + n.width for n in lg.nodes)
-    # Like the source: around the right of every symbol, into the top.
+    # Like the source: around the right of every symbol, ending with its own
+    # arrowhead on the connector just above the decision.
     assert max(p[0] for p in loop.edge_path or []) > rightmost
     decision = next(n for n in lg.nodes if n.id == "n4")
     assert loop.edge_path is not None
-    assert loop.edge_path[-1][1] == pytest.approx(decision.y, abs=1)
+    end_x, end_y = loop.edge_path[-1]
+    assert end_x == pytest.approx(decision.x + decision.width / 2, abs=1)
+    assert end_y < decision.y - 1

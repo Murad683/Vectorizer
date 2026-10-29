@@ -27,7 +27,8 @@ from pptx.text.text import _Paragraph
 from pptx.util import Inches, Pt
 
 from app.core.layout import layout_graph
-from app.core.render.pptx_shapes import add_diagram_to_slide
+from app.core.render.pptx_shapes import add_diagram_to_slide, set_vertical_align
+from app.core.rich_text import markup_runs
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
@@ -195,18 +196,24 @@ def _add_vision_element(
     slide = cursor.new_slide()
     if graph is not None and graph.edges:
         diagram_top_in = 0.2
-        if graph.title:
+        caption_below = bool(graph.title and graph.title_below)
+        if graph.title and not caption_below:
             _add_heading(cursor, graph.title)
             diagram_top_in = cursor.y_in
+        # Room for the caption line + gap, still above the slide's text limit.
+        reserve_in = 0.6 if caption_below else 0.0
         layouted = layout_graph(graph)
-        add_diagram_to_slide(
+        drawn_h = add_diagram_to_slide(
             layouted,
             slide,
             offset_x_emu=Inches(0.5),
             offset_y_emu=Inches(diagram_top_in),
             max_width_emu=Inches(9),
-            max_height_emu=Inches(max(1.0, 7.2 - diagram_top_in)),
+            max_height_emu=Inches(max(1.0, 7.2 - diagram_top_in - reserve_in)),
         )
+        if caption_below and graph.title:
+            cursor.y_in = diagram_top_in + drawn_h / 914400 + 0.1
+            _add_heading(cursor, graph.title)
     else:
         logger.warning(
             "No usable diagram/text for element %s (%s); embedding original image",
@@ -274,9 +281,11 @@ def _add_heading(cursor: _SlideCursor, heading: str) -> None:
     )
     frame = box.text_frame
     frame.word_wrap = True
-    run = frame.paragraphs[0].add_run()
-    run.text = heading
-    run.font.size = _FONT_SIZE
+    for chunk, vert in markup_runs(heading):
+        run = frame.paragraphs[0].add_run()
+        run.text = chunk
+        run.font.size = _FONT_SIZE
+        set_vertical_align(run, vert)
     cursor.advance(height_in)
 
 

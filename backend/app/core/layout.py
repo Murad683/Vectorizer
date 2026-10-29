@@ -19,6 +19,7 @@ import re
 
 import graphviz
 
+from app.core.rich_text import display_lines
 from app.models.diagram import (
     DiagramEdge,
     DiagramGraph,
@@ -36,6 +37,8 @@ _SHAPE_MAP: dict[ShapeType, str] = {
     ShapeType.PROCESS: "rectangle",
     ShapeType.DECISION: "diamond",
     ShapeType.INPUT_OUTPUT: "parallelogram",
+    ShapeType.DOCUMENT: "rectangle",
+    ShapeType.EXIT: "point",
 }
 
 # Graphviz uses 72 points per inch; layout px are 96 dpi (1 px = 9525 EMU).
@@ -50,17 +53,23 @@ _LABEL_WIDTH_PX = 60.0
 
 def _node_size_inches(node: DiagramNode) -> tuple[float, float]:
     """Minimum node size in inches for Graphviz, based on text length."""
+    if node.shape_type == ShapeType.EXIT:
+        return 0.05, 0.05
     char_width = 8.0 / _LAYOUT_DPI
     text_pad = 30.0 / _LAYOUT_DPI
     defaults: dict[ShapeType, tuple[float, float]] = {
         ShapeType.PROCESS: (160.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
         ShapeType.INPUT_OUTPUT: (160.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
+        ShapeType.DOCUMENT: (160.0 / _LAYOUT_DPI, 56.0 / _LAYOUT_DPI),
+        ShapeType.EXIT: (0.05, 0.05),
         ShapeType.DECISION: (180.0 / _LAYOUT_DPI, 90.0 / _LAYOUT_DPI),
         ShapeType.TERMINATOR: (140.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
     }
     w_default, h_default = defaults[node.shape_type]
-    w_needed = len(node.text) * char_width + text_pad
-    return max(w_default, w_needed), h_default
+    longest, n_lines = display_lines(node.text, node.latex)
+    w_needed = longest * char_width + text_pad
+    h_needed = h_default + (n_lines - 1) * 16.0 / _LAYOUT_DPI
+    return max(w_default, w_needed), h_needed
 
 
 def _parse_edge_pos(pos_str: str) -> tuple[list[list[float]], list[float] | None]:
@@ -202,7 +211,10 @@ def layout_graph(graph: DiagramGraph) -> LayoutedGraph:
     for e in graph.edges:
         logger.info(
             "GRAPH EDGE %s->%s label=%r source_port=%s",
-            e.source_id, e.target_id, e.label, e.source_port,
+            e.source_id,
+            e.target_id,
+            e.label,
+            e.source_port,
         )
 
     g = graphviz.Digraph(format="json0")

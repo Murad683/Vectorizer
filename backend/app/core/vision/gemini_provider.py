@@ -4,21 +4,32 @@ This is the only module in the codebase allowed to import the Gemini SDK
 (``google-genai``).
 """
 
-import io
 import logging
 import time
 
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
-from PIL import Image
-from pydantic import ValidationError
 
 from app.config import get_settings
-from app.core.diagram_detect import Detection, annotate, apply_detection, detect
+from app.core.diagram_detect import Detection, annotate, detect
 from app.core.vision.base import VisionProvider
-from app.models.diagram import DiagramGraph
+from app.core.vision.debug_dump import DebugDump
+from app.core.vision.postprocess import (
+    attach_geometry,
+    parse_diagram_graph,
+    parse_vision_analysis,
+    pick_better_answer,
+    topology_problems,
+)
 from app.models.document import ContentType, VisionAnalysis, VisionResult
+
+__all__ = [
+    "GeminiVisionProvider",
+    "parse_diagram_graph",
+    "parse_vision_analysis",
+    "topology_problems",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +57,59 @@ Set "content_type" to:
 - "text_content" — textual content with NO flow arrows, e.g. a matching \
 question made of two labeled lists (a numbered list and a lettered list).
 
-If content_type is "diagram", fill "diagram" with {nodes, edges, title}:
+If content_type is "diagram", fill "diagram" with {nodes, edges, title, \
+title_below}:
 - One node per flowchart symbol. shape_type is one of:
-  "terminator" (oval/stadium, e.g. Başlanğıc / Son),
-  "process" (rectangle, e.g. assignments),
+  "terminator" (oval/stadium/rounded box, e.g. Başlanğıc / Son / START),
+  "process" (plain rectangle, e.g. assignments),
   "decision" (diamond, conditions),
-  "input_output" (parallelogram, input or output of a variable).
-- "text" is the label EXACTLY as written, in Azerbaijani. Do not translate.
+  "input_output" (parallelogram: straight, slanted left and right sides; \
+e.g. "... daxil edilməsi", READ),
+  "document" (rectangle whose BOTTOM edge is a wave instead of a straight \
+line; textbooks draw print/output blocks this way, e.g. "... çap \
+edilməsi", "Çap etməli: ..."). Look at the bottom edge: wavy = "document", \
+slanted sides = "input_output", straight = "process".
+- "text" is the label EXACTLY as written, in Azerbaijani. Do not translate, \
+do not compute, do not complete. When the label is on several lines inside \
+the symbol, keep each line and join them with "\\n".
+- Subscripts and superscripts in "text" (and in "title") are written as \
+_{...} and ^{...}: "X_{1}, X_{2}, ... X_{20}", "10^{3}". Digits printed on the normal \
+baseline stay plain.
+- When a node's label is a mathematical formula PRINTED with a stacked \
+fraction (numerator above a bar, denominator below), a root sign, or \
+raised/lowered characters, ALSO give it in "latex". A slash written on \
+one line ("5/9 * (F - 32)") is NOT a stacked fraction: then "latex" is \
+null and "text" keeps the slash. Use only \\frac, \\sqrt, _, ^, \\text, \
+\\cdot, \\le, \\ge, \\ne, \\ldots: "x = \\frac{-b}{2a}". Keep "text" as a readable \
+one-line version ("x = -b / 2a"). "latex" is null for ordinary labels.
+- A symbol that is EMPTY in the image gets "text": "" (empty string). If \
+some characters are unreadable, write only what is readable. Never invent \
+text that is not printed in the image (e.g. never fill an empty box with \
+the formula you expect there).
+- Old scans often print "ə" as "›" or a similar broken glyph (e.g. \
+"daxil edilm›si" means "daxil edilməsi", "h›" means "hə", \
+"qiym› tl› rinin" means "qiymətlərinin"); write the intended Azerbaijani \
+letter and keep EVERY syllable — a broken glyph replaces one letter, it \
+never removes a syllable.
+- Numbers printed in the margin beside the symbols (step/row numbers \
+1, 2, 3, ...) are NOT part of the flowchart: ignore them.
 - One edge per arrow, in the arrow's direction. Branch labels on arrows \
-(e.g. "Hə", "Yox") go in that edge's "label"; null when the arrow has none.
+(e.g. "hə", "yox") go in that edge's "label", written as printed; null \
+when the arrow has none.
+- An arrow that ends ON ANOTHER ARROW'S LINE (not on a symbol) joins that \
+line: its target_id is the symbol that line finally points to. Follow the \
+line to its arrowhead; never connect it to the symbol the line comes from.
+- An arrow whose head points into EMPTY SPACE (no symbol at its tip: the \
+algorithm continues outside the picture) ends at a node with shape_type \
+"exit", text "", mark null and box_2d a small box around the arrowhead tip. \
+Arrows that join one such open line share one "exit" node. Never connect \
+these arrows to some other symbol, and never add an arrow that is not drawn.
+- A formula or text that is part of the flow (arrows point to or from it) \
+but is drawn WITHOUT any outline is still a node: shape_type "process", \
+"framed": false, mark null, and box_2d tightly around its text. Every \
+symbol with an outline has "framed": true.
+- A drawing may be a fragment without "Başlanğıc"/"Son": then its first \
+symbol has no incoming arrow — that is correct, do not add one.
 - For edges leaving a DECISION (diamond) node: set "source_port" to the \
 side the arrow exits from in the image — "left", "right", "bottom", or \
 "top". Look at the image carefully. Leave it null for non-decision nodes \
@@ -65,11 +120,13 @@ image height / width). Measure carefully: the output layout reproduces the \
 original arrangement from these boxes.
 - Node ids "n1", "n2", ... in reading order. Include loop-back arrows.
 - A flowchart always has arrows, so "edges" must not be empty.
-- "title" is a heading/question line positioned ABOVE the flowchart itself \
-(e.g. "Blok-sxem nəyi hesablayır?" or "Problem 2: ..."), if the image has \
-one. This is NOT any node's own label — it sits outside the flowchart's \
-boxes/arrows entirely. Preserve it EXACTLY. Leave it null if the image has \
-no such line — never invent a title that isn't actually in the image.
+- "title" is a heading or caption line that belongs to the flowchart but \
+sits OUTSIDE its symbols and arrows — either above it (e.g. "Problem 2: \
+...", "Blok-sxem nəyi hesablayır?") or below it (e.g. "Sxem 3. ... \
+alqoritminin blok-sxemi."). Preserve it EXACTLY, including any formula in \
+it (write subscripts inline, e.g. "S = x1 + x2 + ... + x20"). Set \
+"title_below" to true when that line is BELOW the flowchart, false when it \
+is above. Leave "title" null if there is no such line — never invent one.
 Leave "text_content" null in this case.
 
 If content_type is "text_content", fill "text_content" with {heading, lists}:
@@ -103,82 +160,6 @@ def _is_transient(exc: Exception) -> bool:
     return isinstance(exc, ConnectionError | TimeoutError)
 
 
-def _normalise_graph(graph: DiagramGraph) -> DiagramGraph | None:
-    """Normalise edge labels; return None if the graph has no nodes."""
-    for edge in graph.edges:
-        if edge.label is not None and not edge.label.strip():
-            edge.label = None
-    if not graph.nodes:
-        return None
-    return graph
-
-
-def parse_diagram_graph(raw_output: str) -> DiagramGraph | None:
-    """Validate a bare DiagramGraph JSON response, or None.
-
-    Retained for direct-graph callers/tests; the envelope path uses
-    ``parse_vision_analysis``.
-    """
-    try:
-        graph = DiagramGraph.model_validate_json(raw_output)
-    except ValidationError:
-        return None
-    return _normalise_graph(graph)
-
-
-def parse_vision_analysis(raw_output: str) -> VisionAnalysis | None:
-    """Validate a VisionAnalysis envelope and its selected payload, or None.
-
-    A response is usable only when the payload matching ``content_type``
-    is present and non-degenerate: a diagram with nodes, or text content
-    with at least one non-empty list.
-    """
-    try:
-        analysis = VisionAnalysis.model_validate_json(raw_output)
-    except ValidationError:
-        return None
-    if analysis.content_type == ContentType.DIAGRAM:
-        if analysis.diagram is None or _normalise_graph(analysis.diagram) is None:
-            return None
-        return analysis
-    if analysis.text_content is None or not any(
-        lst.lines for lst in analysis.text_content.lists
-    ):
-        return None
-    return analysis
-
-
-def topology_problems(graph: DiagramGraph) -> list[str]:
-    """Structural rules every flowchart obeys; violations mean the model
-    missed or invented arrows (most often a loop-back arrow)."""
-    outs: dict[str, int] = {n.id: 0 for n in graph.nodes}
-    ins: dict[str, int] = {n.id: 0 for n in graph.nodes}
-    for e in graph.edges:
-        if e.source_id in outs:
-            outs[e.source_id] += 1
-        if e.target_id in ins:
-            ins[e.target_id] += 1
-    problems: list[str] = []
-    for n in graph.nodes:
-        label = f'"{n.text}" ({n.id})'
-        kind = n.shape_type.value
-        if kind in ("process", "input_output") and outs[n.id] != 1:
-            problems.append(
-                f"{label} is a {kind} symbol with {outs[n.id]} outgoing arrows; "
-                "it must have exactly 1 (check loop-back arrows)"
-            )
-        elif kind == "decision" and outs[n.id] != 2:
-            problems.append(
-                f"{label} is a decision with {outs[n.id]} outgoing arrows; "
-                "it must have exactly 2"
-            )
-        elif kind == "terminator" and outs[n.id] + ins[n.id] == 0:
-            problems.append(f"{label} has no arrows at all")
-        if kind != "terminator" and ins[n.id] == 0:
-            problems.append(f"{label} has no incoming arrow")
-    return problems
-
-
 class GeminiVisionProvider(VisionProvider):
     """Diagram analysis backed by the Google Gemini API (JSON mode)."""
 
@@ -198,13 +179,18 @@ class GeminiVisionProvider(VisionProvider):
 
     def _retry_topology(
         self, contents: list[str | genai_types.Part], problems: list[str]
-    ) -> VisionAnalysis | None:
-        """Single corrective call listing what was structurally wrong."""
+    ) -> tuple[VisionAnalysis | None, str]:
+        """Single corrective call listing what was structurally wrong.
+
+        Returns ``(analysis or None, raw response text)``.
+        """
         fix = (
             "\nYour previous answer for this image was incomplete:\n- "
             + "\n- ".join(problems)
             + "\nLook at every arrow again, especially arrows that go back up "
-            "to an earlier symbol, and answer again with ALL arrows."
+            "to an earlier symbol and arrows that end in empty space (those "
+            'end at an "exit" node). Answer again with exactly the arrows '
+            "that are drawn — do not invent arrows to satisfy these rules."
         )
         try:
             response = self._client.models.generate_content(
@@ -214,11 +200,12 @@ class GeminiVisionProvider(VisionProvider):
             )
         except Exception:  # noqa: BLE001 - keep the first answer
             logger.exception("Topology retry failed")
-            return None
-        analysis = parse_vision_analysis(response.text or "")
+            return None, ""
+        raw = response.text or ""
+        analysis = parse_vision_analysis(raw)
         if analysis is None or analysis.content_type != ContentType.DIAGRAM:
-            return None
-        return analysis
+            return None, raw
+        return analysis, raw
 
     def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
         """Classify the image and extract it in ONE call.
@@ -228,6 +215,7 @@ class GeminiVisionProvider(VisionProvider):
         ``content_type`` selects ``diagram_graph`` or ``text_content``.
         """
         prompt = _PROMPT
+        dump = DebugDump(image)
         detection: Detection | None = None
         try:
             detection = detect(image)
@@ -250,6 +238,10 @@ class GeminiVisionProvider(VisionProvider):
                 genai_types.Part.from_bytes(data=marked, mime_type="image/png")
             )
         contents.append(prompt)
+        dump.detection(detection)
+        if marked is not None:
+            dump.binary("marked.png", marked)
+        dump.text("prompt.txt", prompt)
 
         last_error: Exception | None = None
         raw_output = ""
@@ -307,34 +299,35 @@ class GeminiVisionProvider(VisionProvider):
                 ),
             )
 
+        dump.text("response.json", raw_output)
+        meta: dict[str, object] = {"model": self._model_name, "context": context}
         if analysis.content_type == ContentType.DIAGRAM and analysis.diagram:
             problems = topology_problems(analysis.diagram)
+            meta["problems"] = problems
             if problems:
                 # One targeted re-ask (only when the answer is provably
                 # incomplete, e.g. a loop-back arrow was left out).
                 logger.warning("Diagram topology incomplete: %s", "; ".join(problems))
-                retry = self._retry_topology(contents, problems)
+                retry, retry_raw = self._retry_topology(contents, problems)
+                dump.text("retry.json", retry_raw)
+                analysis, kept = pick_better_answer(analysis, retry)
+                meta["retry_kept"] = kept
                 if retry is not None and retry.diagram is not None:
-                    still = topology_problems(retry.diagram)
-                    if len(still) < len(problems):
-                        analysis, raw_output = retry, retry.model_dump_json()
-                        if still:
-                            logger.warning(
-                                "Topology still incomplete: %s", "; ".join(still)
-                            )
+                    meta["retry_problems"] = topology_problems(retry.diagram)
+                if kept:
+                    raw_output = retry_raw
+                    still = meta["retry_problems"]
+                    if still:
+                        logger.warning("Topology still incomplete: %s", still)
+        dump.json("meta.json", meta)
 
         note = f"Generated by {self._model_name}."
         if analysis.content_type == ContentType.DIAGRAM:
-            if analysis.diagram is not None and detection is not None and marked:
-                apply_detection(analysis.diagram, detection)
-            elif analysis.diagram is not None:
-                # box_2d is normalised; the layout needs the aspect ratio.
-                try:
-                    with Image.open(io.BytesIO(image)) as img:
-                        analysis.diagram.image_width = img.width
-                        analysis.diagram.image_height = img.height
-                except Exception:  # noqa: BLE001 - boxes then fall back to Graphviz
-                    logger.warning("Could not read image size for box layout")
+            if analysis.diagram is not None:
+                attach_geometry(
+                    analysis.diagram, image, detection, marked=marked is not None
+                )
+                dump.text("graph.json", analysis.diagram.model_dump_json(indent=2))
             return VisionResult(
                 raw_model_output=raw_output,
                 content_type=ContentType.DIAGRAM,

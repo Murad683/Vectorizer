@@ -50,6 +50,10 @@ services:
       # traffic).
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      # Dev aid: save every vision call (image, prompt, raw answer, geometry)
+      # under backend/data/debug_dumps for offline replay
+      # (backend/scripts/replay_diagram.py). backend/data/ is gitignored.
+      DEBUG_DUMP_DIR: /app/data/debug_dumps
     volumes:
       - ./backend:/app
     depends_on:

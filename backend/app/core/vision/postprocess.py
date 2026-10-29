@@ -86,7 +86,9 @@ def topology_problems(graph: DiagramGraph) -> list[str]:
     missed or invented arrows (most often a loop-back arrow).
 
     - process / input_output / document: exactly 1 outgoing arrow;
-    - decision: exactly 2; exit (open arrow end): none, and at least 1 in;
+    - decision: exactly 2; preparation (loop header): 1, or 2 to enter the
+      loop body and to leave the loop (often unlabelled);
+    - exit (open arrow end): none, and at least 1 in;
     - every symbol is entered, except the entry point: a start terminator,
       or — in a fragment drawn without terminators — the first symbol;
     - no arrow from a symbol to itself (seen when a model "fixed" a missing
@@ -120,6 +122,12 @@ def topology_problems(graph: DiagramGraph) -> list[str]:
             problems.append(
                 f"{label} is a decision with {outs[n.id]} outgoing arrows; "
                 "it must have exactly 2"
+            )
+        elif kind == "preparation" and outs[n.id] not in (1, 2):
+            problems.append(
+                f"{label} is a loop header (preparation) with {outs[n.id]} "
+                "outgoing arrows; it must have 1 or 2 (into the loop body and "
+                "out of the loop)"
             )
         elif kind == "terminator" and outs[n.id] + ins[n.id] == 0:
             problems.append(f"{label} has no arrows at all")

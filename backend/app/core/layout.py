@@ -38,6 +38,7 @@ _SHAPE_MAP: dict[ShapeType, str] = {
     ShapeType.DECISION: "diamond",
     ShapeType.INPUT_OUTPUT: "parallelogram",
     ShapeType.DOCUMENT: "rectangle",
+    ShapeType.PREPARATION: "hexagon",
     ShapeType.EXIT: "point",
 }
 
@@ -61,6 +62,7 @@ def _node_size_inches(node: DiagramNode) -> tuple[float, float]:
         ShapeType.PROCESS: (160.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
         ShapeType.INPUT_OUTPUT: (160.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
         ShapeType.DOCUMENT: (160.0 / _LAYOUT_DPI, 56.0 / _LAYOUT_DPI),
+        ShapeType.PREPARATION: (180.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
         ShapeType.EXIT: (0.05, 0.05),
         ShapeType.DECISION: (180.0 / _LAYOUT_DPI, 90.0 / _LAYOUT_DPI),
         ShapeType.TERMINATOR: (140.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),

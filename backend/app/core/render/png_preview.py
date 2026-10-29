@@ -11,7 +11,7 @@ import math
 from PIL import Image, ImageDraw, ImageFont
 
 from app.core.rich_text import display_text
-from app.core.shape_geometry import document_outline
+from app.core.shape_geometry import document_outline, preparation_outline
 from app.models.diagram import LayoutedGraph, LayoutedNode, ShapeType
 
 _FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -34,6 +34,8 @@ def _outline(node: LayoutedNode) -> list[tuple[float, float]]:
         return [(x + s, y), (x + w, y), (x + w - s, y + h), (x, y + h)]
     if node.shape_type == ShapeType.DOCUMENT:
         return [(x + fx * w, y + fy * h) for fx, fy in document_outline()]
+    if node.shape_type == ShapeType.PREPARATION:
+        return [(x + fx * w, y + fy * h) for fx, fy in preparation_outline()]
     return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
 
 

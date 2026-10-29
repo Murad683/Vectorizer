@@ -62,7 +62,10 @@ title_below}:
 - One node per flowchart symbol. shape_type is one of:
   "terminator" (oval/stadium/rounded box, e.g. Başlanğıc / Son / START),
   "process" (plain rectangle, e.g. assignments),
-  "decision" (diamond, conditions),
+  "decision" (diamond: FOUR corners, a condition such as "X <= Y"),
+  "preparation" (HEXAGON: flat top and bottom, pointed left and right \
+ends — a loop header such as "i=2,N" or "i=1,10"; never call a hexagon a \
+decision),
   "input_output" (parallelogram: straight, slanted left and right sides; \
 e.g. "... daxil edilməsi", READ),
   "document" (rectangle whose BOTTOM edge is a wave instead of a straight \
@@ -110,10 +113,11 @@ but is drawn WITHOUT any outline is still a node: shape_type "process", \
 symbol with an outline has "framed": true.
 - A drawing may be a fragment without "Başlanğıc"/"Son": then its first \
 symbol has no incoming arrow — that is correct, do not add one.
-- For edges leaving a DECISION (diamond) node: set "source_port" to the \
-side the arrow exits from in the image — "left", "right", "bottom", or \
-"top". Look at the image carefully. Leave it null for non-decision nodes \
-or when unsure.
+- For edges leaving a DECISION (diamond) or PREPARATION (hexagon) node: \
+set "source_port" to the side the arrow exits from in the image — "left", \
+"right", "bottom", or "top". Look at the image carefully. Leave it null for \
+other nodes or when unsure. A hexagon's two arrows (into the loop body and \
+out of the loop) often carry no label: then "label" is null.
 - For every node set "box_2d" to the symbol's bounding box in the image as \
 [ymin, xmin, ymax, xmax], integers normalised to 0-1000 (relative to the \
 image height / width). Measure carefully: the output layout reproduces the \

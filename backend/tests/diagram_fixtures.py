@@ -218,11 +218,68 @@ def sum_loop() -> DiagramGraph:
     )
 
 
+def factorial_preparation() -> DiagramGraph:
+    """``samples/factorial_preparation.png`` (206x437): F = N! with a for-loop
+    header "i=2,N" drawn as a HEXAGON (preparation symbol): the body leaves
+    at its bottom, the loop returns into its left point, the exit leaves at
+    its right point. The print block "F" has a wavy bottom (document)."""
+    return _graph(
+        (206, 437),
+        [
+            ("n1", T.TERMINATOR, "Başlanğıc", (50, 4, 161, 43)),
+            ("n2", T.INPUT_OUTPUT, "N", (51, 64, 158, 98)),
+            ("n3", T.PROCESS, "F=1", (48, 117, 161, 156)),
+            ("n4", T.PREPARATION, "i=2,N", (52, 177, 161, 214)),
+            ("n5", T.PROCESS, "F=F*i", (46, 236, 158, 273)),
+            ("n6", T.DOCUMENT, "F", (47, 330, 158, 367)),
+            ("n7", T.TERMINATOR, "Son", (47, 389, 158, 425)),
+        ],
+        [
+            _e("n1", "n2"),
+            _e("n2", "n3"),
+            _e("n3", "n4"),
+            _e("n4", "n5", None, P.BOTTOM),
+            _e("n5", "n4"),
+            _e("n4", "n6", None, P.RIGHT),
+            _e("n6", "n7"),
+        ],
+    )
+
+
+def xy_loop_photo() -> DiagramGraph:
+    """``samples/xy_loop_photo.png`` (345x572): a skewed phone photo of a
+    while-loop. The loop back from ``Y = Y + 5`` lands on the connector
+    above the decision; "yox" leaves right and comes back to the output."""
+    return _graph(
+        (345, 572),
+        [
+            ("n1", T.TERMINATOR, "Başlanğıc", (73, 13, 213, 62)),
+            ("n2", T.INPUT_OUTPUT, "X, Y", (59, 76, 228, 124)),
+            ("n3", T.DECISION, "X ≤ Y", (52, 145, 239, 215)),
+            ("n4", T.PROCESS, "X = X+X*Y", (69, 235, 226, 276)),
+            ("n5", T.PROCESS, "Y = Y + 5", (67, 299, 230, 341)),
+            ("n6", T.INPUT_OUTPUT, "X", (66, 409, 234, 466)),
+            ("n7", T.TERMINATOR, "Son", (65, 496, 247, 558)),
+        ],
+        [
+            _e("n1", "n2"),
+            _e("n2", "n3"),
+            _e("n3", "n4", "hə", P.BOTTOM),
+            _e("n4", "n5"),
+            _e("n5", "n3"),
+            _e("n3", "n6", "yox", P.RIGHT),
+            _e("n6", "n7"),
+        ],
+    )
+
+
 FIXTURES: dict[str, tuple[str, Callable[[], DiagramGraph]]] = {
     "quadratic_equation": ("quadratic_equation.png", quadratic_equation),
     "fahrenheit_celsius": ("fahrenheit_celsius.png", fahrenheit_celsius),
     "sp_open_exit": ("sp_open_exit.png", sp_open_exit),
     "sum_loop": ("sum_loop.jpg", sum_loop),
+    "factorial_preparation": ("factorial_preparation.png", factorial_preparation),
+    "xy_loop_photo": ("xy_loop_photo.png", xy_loop_photo),
 }
 
 

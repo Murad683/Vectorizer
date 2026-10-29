@@ -3324,3 +3324,27 @@ junction); renderers then draw it as a freeform line ending in an
 arrowhead on the junction. Affects: B loop and `P*3` → open exit, D loop,
 A `6/8 → Son`, `flowchart_a3` loop. The sum caption keeps the source's literal "1 =" (the
 textbook's S is missing in the image; the model no longer invents it).
+
+## Phase 27 — Preparation (hexagon) symbol (branch `feature/preparation-shape`)
+
+**Trigger**: a factorial flowchart's for-loop header "i=2,N" is a hexagon
+(flowchart *preparation*) but was rendered as a diamond.
+
+- `ShapeType.PREPARATION`: Word `flowChartPreparation`, PowerPoint
+  `FLOWCHART_PREPARATION`, Graphviz `hexagon`, SVG/PNG previews. Shared
+  geometry in `shape_geometry.py` (points set in by 2/10 of the width; text
+  between them). The router follows the pointed ends (ports on the tips and
+  on the slanted edges), like the diamond outline.
+- Topology: a preparation node has 1 or 2 outgoing arrows (into the loop
+  body and out of the loop), often unlabelled.
+- Prompt: hexagon = preparation, four-cornered diamond = decision, never a
+  hexagon as a decision; `source_port` for both.
+- Detection only finds the shape; its type comes from the model.
+- New fixtures: `samples/factorial_preparation.png`,
+  `samples/xy_loop_photo.png` (a skewed phone photo).
+- Two routing fixes found with the photo: (1) the author's line corners are
+  welded before spacing cuts (ends differ by the line thickness, and a cut
+  between them tore the loop corner apart); (2) retracing a line already
+  routed into the same symbol is as cheap as an author's line, so a loop
+  joins the connector above a decision like the source instead of entering
+  the diamond's side corner.

@@ -25,7 +25,7 @@ from app.core.rich_text import (
     latex_runs,
     markup_runs,
 )
-from app.core.shape_geometry import DOCUMENT_TEXT_BOTTOM
+from app.core.shape_geometry import DOCUMENT_TEXT_BOTTOM, PREPARATION_INSET
 from app.models.diagram import DiagramEdge, LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ SHAPE_TYPE_TO_MSO: dict[ShapeType, MSO_SHAPE] = {
     ShapeType.DECISION: MSO_SHAPE.DIAMOND,
     ShapeType.INPUT_OUTPUT: MSO_SHAPE.PARALLELOGRAM,
     ShapeType.DOCUMENT: MSO_SHAPE.FLOWCHART_DOCUMENT,
+    ShapeType.PREPARATION: MSO_SHAPE.FLOWCHART_PREPARATION,
 }
 
 # Layout px are treated as CSS px: 1 px = 9525 EMU (96 dpi).
@@ -110,8 +111,11 @@ def _font_size_for(node: LayoutedNode, scale: float) -> Pt:
     usable_h = node.height * scale * 0.85
     if node.shape_type == ShapeType.DOCUMENT:
         usable_h *= DOCUMENT_TEXT_BOTTOM  # the wave is not part of the text area
+    usable_w = node.width * scale
+    if node.shape_type == ShapeType.PREPARATION:
+        usable_w *= 1 - 2 * PREPARATION_INSET  # text sits between the points
     while size > int(_MIN_FONT_SIZE.pt):
-        fits_w = longest * size * approx_char_px <= node.width * scale
+        fits_w = longest * size * approx_char_px <= usable_w
         fits_h = n_lines * size * 1.2 * 4 / 3 <= usable_h
         if fits_w and fits_h:
             break

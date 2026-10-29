@@ -67,7 +67,7 @@ def _apply(shift: tuple[int, int] = (0, 0)) -> dict[str, tuple[float, ...]]:
     return {n.id: _px(n.box_2d) for n in graph.nodes if not n.framed and n.box_2d}
 
 
-@pytest.mark.parametrize("shift", [(0, 0), (8, 3), (-6, -4)])
+@pytest.mark.parametrize("shift", [(0, 0), (8, 3), (-6, -4), (0, -12)])
 def test_frameless_boxes_are_measured_on_the_ink(shift: tuple[int, int]) -> None:
     measured = _apply(shift)
     for nid, truth in _TRUTH.items():
@@ -121,3 +121,18 @@ def test_frameless_node_is_text_only_in_docx_and_pptx() -> None:
 
 def test_prompt_asks_for_frameless_nodes() -> None:
     assert '"framed": false' in _PROMPT
+
+
+def test_text_in_an_empty_block_is_dropped() -> None:
+    """Live answer: the model filled the empty block 3 with D = b^2 - 4ac."""
+    image = (SAMPLES / "quadratic_equation.png").read_bytes()
+    det = detect(image)
+    assert det is not None
+    assert [s.empty for s in det.shapes].count(True) == 1
+    graph = quadratic_equation()
+    block = next(n for n in graph.nodes if n.id == "n3")
+    block.text = "D = b^{2} - 4ac"
+    simulate_marks(graph, det)
+    apply_detection(graph, det)
+    assert block.text == "" and block.latex is None
+    assert next(n for n in graph.nodes if n.id == "n4").text == "D > 0"

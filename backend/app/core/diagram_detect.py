@@ -58,6 +58,8 @@ class DetectedShape:
     # Geometric hint where the outline is unambiguous: "document" (flat top,
     # vertical sides, wavy bottom); "" = no opinion (the model decides).
     kind: str = ""
+    # No ink in the symbol's central area: the block is printed empty.
+    empty: bool = False
 
 
 @dataclass
@@ -395,6 +397,11 @@ def detect(image: bytes) -> Detection | None:
 
     detection = Detection(width=orig_w, height=orig_h)
     for x, y, w, h, fill, kind in shapes:
+        # Central 40 % of the box: inside every symbol type (a diamond too),
+        # where a label would be. Labelled symbols measure >= 7 % ink here.
+        mx, my = int(w * 0.3), int(h * 0.3)
+        core = ink[y + my : y + h - my, x + mx : x + w - mx]
+        empty = core.size > 0 and np.count_nonzero(core) < 0.01 * core.size
         detection.shapes.append(
             DetectedShape(
                 back(max(x - _OUTLINE_PAD, 0)),
@@ -403,6 +410,7 @@ def detect(image: bytes) -> Detection | None:
                 back(y + h + _OUTLINE_PAD),
                 fill,
                 kind,
+                bool(empty),
             )
         )
     detection.segments = [
@@ -483,6 +491,11 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
         used.add(mark)
         node.framed = True  # it has a detected outline after all
         s = detection.shapes[mark - 1]
+        if s.empty and (node.text.strip() or node.latex):
+            # Measured, not guessed: the block is printed empty, so any text
+            # is the model "completing" it (seen live: D = b^2 - 4ac).
+            logger.warning("Node %s: symbol is empty; dropped %r", node.id, node.text)
+            node.text, node.latex = "", None
         if s.kind == "document" and node.shape_type in (
             ShapeType.PROCESS,
             ShapeType.INPUT_OUTPUT,
@@ -529,12 +542,17 @@ def _measure_frameless(box_2d: list[int], detection: Detection) -> list[int]:
     w, h = float(detection.width), float(detection.height)
     ymin, xmin, ymax, xmax = box_2d
     x0, y0, x1, y1 = xmin / 1000 * w, ymin / 1000 * h, xmax / 1000 * w, ymax / 1000 * h
-    gx, gy = 0.1 * (x1 - x0), 0.2 * (y1 - y0)
+    gx, gy = 0.1 * (x1 - x0), 0.5 * (y1 - y0)
     sel = (x0 - gx, y0 - gy, x1 + gx, y1 + gy)
+    # Model boxes drift (seen live: ~12 px up on a 25 px formula), so the
+    # centre test tolerates a quarter of the height vertically; margin
+    # numbers sit beside the formula, arrow tails well below it.
+    ty, tx = 0.25 * (y1 - y0), 0.03 * (x1 - x0)
     picked = [
         b
         for b in detection.blobs
-        if x0 <= (b[0] + b[2]) / 2 <= x1 and y0 <= (b[1] + b[3]) / 2 <= y1
+        if x0 - tx <= (b[0] + b[2]) / 2 <= x1 + tx
+        and y0 - ty <= (b[1] + b[3]) / 2 <= y1 + ty
     ]
     if not picked:
         return box_2d

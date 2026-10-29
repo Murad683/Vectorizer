@@ -73,7 +73,7 @@ slanted sides = "input_output", straight = "process".
 do not compute, do not complete. When the label is on several lines inside \
 the symbol, keep each line and join them with "\\n".
 - Subscripts and superscripts in "text" (and in "title") are written as \
-_{...} and ^{...}: "X_{1}, X_{2}, ... X_{20}", "b^{2}". Digits printed on the normal \
+_{...} and ^{...}: "X_{1}, X_{2}, ... X_{20}", "10^{3}". Digits printed on the normal \
 baseline stay plain.
 - When a node's label is a mathematical formula PRINTED with a stacked \
 fraction (numerator above a bar, denominator below), a root sign, or \

@@ -3306,6 +3306,11 @@ exit and frameless types, branch labels, ports, caption position), exact
 geometry, zero `quality_issues`, verified in Word. Follow-ups from it: the
 model gave LaTeX for an inline "5/9 * (F - 32)" (stacked fraction in Word)
 and read "qiym› tl› rinin" as "qiymətinin"; the prompt now addresses both
-(not yet re-verified live), and LaTeX that leaks into ``text`` is rebuilt
-from ``latex``. The sum caption keeps the source's literal "1 =" (the
+and LaTeX that leaks into ``text`` is rebuilt from ``latex``. Re-run (2
+calls): both fixed, but the model filled the empty block 3 again
+("D = b^2 - 4ac", primed by a prompt example) — the detector now measures
+empty symbols (`DetectedShape.empty`, no ink in the central 40 %) and
+drops any text the model puts there; the example was changed. Frameless
+box measuring tolerates ~25 % vertical drift of the model box (seen: 12 px
+on a 25 px formula). Total live calls in Phase 26: 6. The sum caption keeps the source's literal "1 =" (the
 textbook's S is missing in the image; the model no longer invents it).

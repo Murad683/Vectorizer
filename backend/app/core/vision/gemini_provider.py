@@ -87,6 +87,13 @@ when the arrow has none.
 - An arrow that ends ON ANOTHER ARROW'S LINE (not on a symbol) joins that \
 line: its target_id is the symbol that line finally points to. Follow the \
 line to its arrowhead; never connect it to the symbol the line comes from.
+- An arrow whose head points into EMPTY SPACE (no symbol at its tip: the \
+algorithm continues outside the picture) ends at a node with shape_type \
+"exit", text "", mark null and box_2d a small box around the arrowhead tip. \
+Arrows that join one such open line share one "exit" node. Never connect \
+these arrows to some other symbol, and never add an arrow that is not drawn.
+- A drawing may be a fragment without "Başlanğıc"/"Son": then its first \
+symbol has no incoming arrow — that is correct, do not add one.
 - For edges leaving a DECISION (diamond) node: set "source_port" to the \
 side the arrow exits from in the image — "left", "right", "bottom", or \
 "top". Look at the image carefully. Leave it null for non-decision nodes \
@@ -165,7 +172,9 @@ class GeminiVisionProvider(VisionProvider):
             "\nYour previous answer for this image was incomplete:\n- "
             + "\n- ".join(problems)
             + "\nLook at every arrow again, especially arrows that go back up "
-            "to an earlier symbol, and answer again with ALL arrows."
+            "to an earlier symbol and arrows that end in empty space (those "
+            'end at an "exit" node). Answer again with exactly the arrows '
+            "that are drawn — do not invent arrows to satisfy these rules."
         )
         try:
             response = self._client.models.generate_content(

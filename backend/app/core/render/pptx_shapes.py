@@ -174,7 +174,9 @@ def choose_connector_from_path(
     end_idx = _nearest_cxn_site(target_node, end_pt[0], end_pt[1])
 
     bends = _enforce_no_diagonal(bends, source_node, target_node, start_idx, end_idx)
-    bends = _enforce_min_bends_for_axis(bends, source_node, target_node, start_idx, end_idx)
+    bends = _enforce_min_bends_for_axis(
+        bends, source_node, target_node, start_idx, end_idx
+    )
 
     if bends == 0:
         return "straightConnector1", start_idx, end_idx, {}, 0
@@ -204,9 +206,7 @@ def choose_connector_from_path(
     return preset, start_idx, end_idx, adjs, bends
 
 
-def _nearest_cxn_site(
-    node: LayoutedNode, px: float, py: float
-) -> int:
+def _nearest_cxn_site(node: LayoutedNode, px: float, py: float) -> int:
     """Return the connection-site index (0=top, 1=left, 2=bottom, 3=right)
     on ``node`` closest to the point ``(px, py)``."""
     cx = node.x + node.width / 2
@@ -228,12 +228,19 @@ def _nearest_cxn_site(
 
 
 _FORCED_BEND_CANDIDATE_RATIOS = (
-    50000, 25000, 75000, 10000, 90000,
+    50000,
+    25000,
+    75000,
+    10000,
+    90000,
     # Wider fallbacks: route the spine outside the direct start-end gap
     # entirely (a bigger dogleg) for cramped layouts — e.g. two nearby
     # decisions with several edge labels packed into a narrow corridor —
     # where every in-between position is occupied.
-    150000, -50000, 200000, -100000,
+    150000,
+    -50000,
+    200000,
+    -100000,
 )
 
 
@@ -393,7 +400,12 @@ def _enforce_no_diagonal(
             "Promoting 0-bend to 1-bend: connection sites differ in both "
             "x (%.1f vs %.1f, %d EMU) and y (%.1f vs %.1f, %d EMU) "
             "— straight would be diagonal",
-            sx, ex, int(dx_emu), sy, ey, int(dy_emu),
+            sx,
+            ex,
+            int(dx_emu),
+            sy,
+            ey,
+            int(dy_emu),
         )
         return 1
     return bends
@@ -456,7 +468,9 @@ def _enforce_min_bends_for_axis(
         "Promoting %d-bend to 2-bend: connection sites (%d, %d) sit "
         "on the same axis but aren't aligned — a single bend can't "
         "connect them without an invalid route",
-        bends, start_idx, end_idx,
+        bends,
+        start_idx,
+        end_idx,
     )
     return 2
 
@@ -525,7 +539,9 @@ def assert_no_diagonal_connector(
             "Diagonal invariant triggered for edge '%s': "
             "straightConnector1 with cx=%d, cy=%d — auto-correcting "
             "to bentConnector2",
-            edge_label, cx_emu, cy_emu,
+            edge_label,
+            cx_emu,
+            cy_emu,
         )
         return "bentConnector2"
     return preset
@@ -547,6 +563,32 @@ def _add_arrowhead(line_format: object) -> None:
         ln.append(parse_xml(f'<a:tailEnd {nsdecls("a")} type="triangle"/>'))
 
 
+def _add_freeform_edge(
+    slide: Slide,
+    edge: DiagramEdge,
+    scale: float,
+    offset_x_emu: int,
+    offset_y_emu: int,
+) -> None:
+    """Draw ``edge.edge_path`` as an editable polyline with an arrowhead."""
+    pts = [
+        (
+            offset_x_emu + int(x * scale * _EMU_PER_PX),
+            offset_y_emu + int(y * scale * _EMU_PER_PX),
+        )
+        for x, y in edge.edge_path or []
+    ]
+    builder = slide.shapes.build_freeform(pts[0][0], pts[0][1], scale=1.0)
+    builder.add_line_segments(pts[1:], close=False)
+    shape = builder.convert_to_shape()
+    shape.fill.background()
+    shape.line.width = Pt(1.5)
+    shape.line.color.rgb = RGBColor(0, 0, 0)
+    shape.shadow.inherit = False
+    _add_arrowhead(shape.line)
+    shape.name = f"edge-{edge.source_id}-{edge.target_id}"
+
+
 def _add_exact_edge(
     slide: Slide,
     edge: DiagramEdge,
@@ -565,14 +607,10 @@ def _add_exact_edge(
     anything with bends becomes an editable freeform polyline.
     """
     path = edge.edge_path or []
-    pts = [
-        (
-            offset_x_emu + int(x * scale * _EMU_PER_PX),
-            offset_y_emu + int(y * scale * _EMU_PER_PX),
-        )
-        for x, y in path
-    ]
-    plain = ShapeType.INPUT_OUTPUT not in (source_node.shape_type, target_node.shape_type)
+    plain = ShapeType.INPUT_OUTPUT not in (
+        source_node.shape_type,
+        target_node.shape_type,
+    )
     # Parallelograms use custom connection sites that Office and other
     # viewers resolve differently, so edges touching them are drawn as
     # plain (unglued) lines that look identical everywhere.
@@ -597,15 +635,7 @@ def _add_exact_edge(
             _add_arrowhead(connector.line)
             connector.name = f"edge-{edge.source_id}-{edge.target_id}"
             return
-    builder = slide.shapes.build_freeform(pts[0][0], pts[0][1], scale=1.0)
-    builder.add_line_segments(pts[1:], close=False)
-    shape = builder.convert_to_shape()
-    shape.fill.background()
-    shape.line.width = Pt(1.5)
-    shape.line.color.rgb = RGBColor(0, 0, 0)
-    shape.shadow.inherit = False
-    _add_arrowhead(shape.line)
-    shape.name = f"edge-{edge.source_id}-{edge.target_id}"
+    _add_freeform_edge(slide, edge, scale, offset_x_emu, offset_y_emu)
 
 
 def add_diagram_to_slide(
@@ -634,6 +664,8 @@ def add_diagram_to_slide(
 
     shapes_by_id = {}
     for node in graph.nodes:
+        if node.shape_type == ShapeType.EXIT:
+            continue  # an open arrow end is not drawn
         width_emu = _px_to_emu(node.width, scale)
         height_emu = _px_to_emu(node.height, scale)
         shape = slide.shapes.add_shape(
@@ -669,18 +701,32 @@ def add_diagram_to_slide(
     # connector that needs a bend position without real Graphviz path
     # data (see _enforce_min_bends_for_axis) can steer clear of them
     # instead of blindly bisecting onto a label.
-    node_boxes = {
-        n.id: (n.x, n.y, n.x + n.width, n.y + n.height) for n in graph.nodes
-    }
+    node_boxes = {n.id: (n.x, n.y, n.x + n.width, n.y + n.height) for n in graph.nodes}
     label_boxes = [
-        (e.label_x, e.label_y, e.label_x + _LABEL_WIDTH_PX, e.label_y + _LABEL_HEIGHT_PX)
+        (
+            e.label_x,
+            e.label_y,
+            e.label_x + _LABEL_WIDTH_PX,
+            e.label_y + _LABEL_HEIGHT_PX,
+        )
         for e in graph.edges
         if e.label and e.label_x is not None and e.label_y is not None
     ]
 
+    exit_ids = {n.id for n in graph.nodes if n.shape_type == ShapeType.EXIT}
     for edge in graph.edges:
         source = shapes_by_id.get(edge.source_id)
         target = shapes_by_id.get(edge.target_id)
+        if (
+            source is not None
+            and edge.target_id in exit_ids
+            and edge.edge_path
+            and len(edge.edge_path) >= 2
+        ):
+            _add_freeform_edge(slide, edge, scale, offset_x_emu, offset_y_emu)
+            if edge.label:
+                _add_edge_label(slide, edge, scale, offset_x_emu, offset_y_emu)
+            continue
         if source is None or target is None:
             logger.warning(
                 "Edge %s->%s references unknown node; skipped",
@@ -693,8 +739,15 @@ def add_diagram_to_slide(
 
         if edge.exact_route and edge.edge_path and len(edge.edge_path) >= 2:
             _add_exact_edge(
-                slide, edge, source, target, source_node, target_node,
-                scale, offset_x_emu, offset_y_emu,
+                slide,
+                edge,
+                source,
+                target,
+                source_node,
+                target_node,
+                scale,
+                offset_x_emu,
+                offset_y_emu,
             )
             if edge.label:
                 _add_edge_label(slide, edge, scale, offset_x_emu, offset_y_emu)
@@ -713,16 +766,15 @@ def add_diagram_to_slide(
         # there. Graphviz's dot already routes back-edges cleanly around
         # unrelated nodes, so there is no need for a separate mechanism.
         avoid_boxes = [
-            box for nid, box in node_boxes.items()
+            box
+            for nid, box in node_boxes.items()
             if nid not in (edge.source_id, edge.target_id)
         ] + label_boxes
         preset, start_idx, end_idx, adjs, bend_count = choose_connector_from_path(
             edge.edge_path, source_node, target_node, avoid_boxes
         )
         mso_type = _MSO_CONNECTOR_MAP.get(preset, MSO_CONNECTOR.ELBOW)
-        connector = slide.shapes.add_connector(
-            mso_type, Emu(0), Emu(0), Emu(0), Emu(0)
-        )
+        connector = slide.shapes.add_connector(mso_type, Emu(0), Emu(0), Emu(0), Emu(0))
         connector.begin_connect(source, start_idx)
         connector.end_connect(target, end_idx)
 

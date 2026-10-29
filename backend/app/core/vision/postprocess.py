@@ -66,7 +66,15 @@ def parse_vision_analysis(raw_output: str) -> VisionAnalysis | None:
 
 def topology_problems(graph: DiagramGraph) -> list[str]:
     """Structural rules every flowchart obeys; violations mean the model
-    missed or invented arrows (most often a loop-back arrow)."""
+    missed or invented arrows (most often a loop-back arrow).
+
+    - process / input_output / document: exactly 1 outgoing arrow;
+    - decision: exactly 2; exit (open arrow end): none, and at least 1 in;
+    - every symbol is entered, except the entry point: a start terminator,
+      or — in a fragment drawn without terminators — the first symbol;
+    - no arrow from a symbol to itself (seen when a model "fixed" a missing
+      arrow by inventing one).
+    """
     outs: dict[str, int] = {n.id: 0 for n in graph.nodes}
     ins: dict[str, int] = {n.id: 0 for n in graph.nodes}
     for e in graph.edges:
@@ -74,6 +82,13 @@ def topology_problems(graph: DiagramGraph) -> list[str]:
             outs[e.source_id] += 1
         if e.target_id in ins:
             ins[e.target_id] += 1
+    has_start = any(
+        n.shape_type.value == "terminator" and ins[n.id] == 0 and outs[n.id] > 0
+        for n in graph.nodes
+    )
+    # Without a start terminator the drawing is a fragment; its entry is
+    # the first symbol in reading order (ids follow reading order).
+    entry = graph.nodes[0].id if graph.nodes and not has_start else None
     problems: list[str] = []
     for n in graph.nodes:
         label = f'"{n.text}" ({n.id})'
@@ -81,7 +96,8 @@ def topology_problems(graph: DiagramGraph) -> list[str]:
         if kind in ("process", "input_output", "document") and outs[n.id] != 1:
             problems.append(
                 f"{label} is a {kind} symbol with {outs[n.id]} outgoing arrows; "
-                "it must have exactly 1 (check loop-back arrows)"
+                "it must have exactly 1 (check loop-back arrows and arrows "
+                "that end in empty space)"
             )
         elif kind == "decision" and outs[n.id] != 2:
             problems.append(
@@ -90,8 +106,16 @@ def topology_problems(graph: DiagramGraph) -> list[str]:
             )
         elif kind == "terminator" and outs[n.id] + ins[n.id] == 0:
             problems.append(f"{label} has no arrows at all")
-        if kind != "terminator" and ins[n.id] == 0:
+        elif kind == "exit" and (outs[n.id] or not ins[n.id]):
+            problems.append(
+                f"{label} is an open arrow end; it must have incoming arrows "
+                "and no outgoing ones"
+            )
+        if kind not in ("terminator", "exit") and ins[n.id] == 0 and n.id != entry:
             problems.append(f"{label} has no incoming arrow")
+    for e in graph.edges:
+        if e.source_id == e.target_id:
+            problems.append(f"an arrow goes from {e.source_id} to itself")
     return problems
 
 

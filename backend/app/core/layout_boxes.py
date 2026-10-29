@@ -35,6 +35,7 @@ from app.models.diagram import (
     LayoutedGraph,
     LayoutedNode,
     PortSide,
+    ShapeType,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,61 @@ def _too_close(a: _Box, b: _Box, gap: float) -> bool:
     return gx < gap and gy < gap
 
 
+def _guess_exit_box(graph: DiagramGraph, exit_id: str) -> list[int] | None:
+    """A model forgot the open arrow end's box: put it just below the
+    symbols that point at it (normalised 0-1000 like ``box_2d``)."""
+    sources = [
+        n.box_2d
+        for e in graph.edges
+        if e.target_id == exit_id
+        for n in graph.nodes
+        if n.id == e.source_id and n.box_2d
+    ]
+    if not sources:
+        return None
+    x = sum((b[1] + b[3]) / 2 for b in sources) / len(sources)
+    y = min(1000, max(b[2] for b in sources) + 60)
+    return [round(y), round(x), round(y), round(x)]
+
+
+def _snap_exits_to_free_line_ends(
+    ids: list[str],
+    points: set[str],
+    cxs: list[float],
+    cys: list[float],
+    ws: list[float],
+    hs: list[float],
+    vert: list[tuple[float, float, float]],
+    horiz: list[tuple[float, float, float]],
+) -> None:
+    """Move each open arrow end onto the nearest end of an original line
+    that touches no symbol — that is where the author's arrowhead is."""
+    if not points or not (vert or horiz):
+        return
+    rects = [
+        (cxs[i] - ws[i] / 2, cys[i] - hs[i] / 2, cxs[i] + ws[i] / 2, cys[i] + hs[i] / 2)
+        for i, nid in enumerate(ids)
+        if nid not in points
+    ]
+
+    def free(p: Point) -> bool:
+        pad = _ATTACH_TOL
+        return not any(
+            r[0] - pad <= p[0] <= r[2] + pad and r[1] - pad <= p[1] <= r[3] + pad
+            for r in rects
+        )
+
+    ends: list[Point] = [(x, y) for x, a, b in vert for y in (a, b)]
+    ends += [(x, y) for y, a, b in horiz for x in (a, b)]
+    ends = [p for p in ends if free(p)]
+    for i, nid in enumerate(ids):
+        if nid not in points or not ends:
+            continue
+        best = min(ends, key=lambda p: abs(p[0] - cxs[i]) + abs(p[1] - cys[i]))
+        if abs(best[0] - cxs[i]) + abs(best[1] - cys[i]) <= 1.5 * _TARGET_NODE_WIDTH:
+            cxs[i], cys[i] = best
+
+
 def _place_nodes(
     graph: DiagramGraph,
 ) -> tuple[dict[str, _Box], list[Segment]] | None:
@@ -159,9 +215,25 @@ def _place_nodes(
     width = float(graph.image_width or 1000)
     height = float(graph.image_height or 1000)
     exact = graph.boxes_detected
+    # Open arrow ends: positioned like nodes but zero-sized, never snapped
+    # to the symbol grid and never pushed apart from symbols.
+    points = {n.id for n in graph.nodes if n.shape_type == ShapeType.EXIT}
     raw: dict[str, tuple[float, float, float, float]] = {}
     for node in graph.nodes:
         b = node.box_2d
+        if node.id in points:
+            if b is None or len(b) != 4:
+                b = _guess_exit_box(graph, node.id)
+            if b is None:
+                return None
+            ymin, xmin, ymax, xmax = (float(v) for v in b)
+            raw[node.id] = (
+                (xmin + xmax) / 2000 * width,
+                (ymin + ymax) / 2000 * height,
+                0.0,
+                0.0,
+            )
+            continue
         if b is None or len(b) != 4:
             return None
         ymin, xmin, ymax, xmax = (float(v) for v in b)
@@ -176,7 +248,10 @@ def _place_nodes(
     if len(raw) != len(graph.nodes):
         return None
 
-    median_w = statistics.median(v[2] for v in raw.values())
+    symbols = [n for n in graph.nodes if n.id not in points]
+    if not symbols:
+        return None
+    median_w = statistics.median(raw[n.id][2] for n in symbols)
     scale = _TARGET_NODE_WIDTH / median_w
     if exact:
         # One uniform scale large enough that every node's text fits in
@@ -186,7 +261,7 @@ def _place_nodes(
                 _min_size(n.text, n.shape_type.value)[0] / raw[n.id][2],
                 _min_size(n.text, n.shape_type.value)[1] / raw[n.id][3],
             )
-            for n in graph.nodes
+            for n in symbols
         )
         scale = min(max(scale, need), scale * _MAX_TEXT_UPSCALE)
 
@@ -194,6 +269,12 @@ def _place_nodes(
     cxs, cys, ws, hs = [], [], [], []
     for node in graph.nodes:
         x, y, w, h = raw[node.id]
+        if node.id in points:
+            ws.append(0.0)
+            hs.append(0.0)
+            cxs.append(x * scale)
+            cys.append(y * scale)
+            continue
         mw, mh = _min_size(node.text, node.shape_type.value)
         ws.append(max(w * scale, mw))
         hs.append(max(h * scale, mh))
@@ -222,8 +303,14 @@ def _place_nodes(
     # arrow stays straight between the (snapped) shapes it connects.
     ratio = _SNAP_EXACT if exact else _SNAP_APPROX
     tol = ratio * _TARGET_NODE_WIDTH
-    new_cxs = _cluster(cxs, tol)
-    new_cys = _cluster(cys, tol * (1.0 if exact else 0.6))
+    sym = [i for i, nid in enumerate(ids) if nid not in points]
+    new_cxs, new_cys = list(cxs), list(cys)
+    for i, v in zip(sym, _cluster([cxs[i] for i in sym], tol), strict=True):
+        new_cxs[i] = v
+    for i, v in zip(
+        sym, _cluster([cys[i] for i in sym], tol * (1.0 if exact else 0.6)), strict=True
+    ):
+        new_cys[i] = v
 
     def follow(v: float, old: list[float], new: list[float]) -> float:
         # A guide moves with the node centre it was aligned with; guides
@@ -232,9 +319,14 @@ def _place_nodes(
         best = min(range(len(old)), key=lambda i: abs(old[i] - v))
         return v + (new[best] - old[best]) if abs(old[best] - v) <= tol else v
 
-    vert = [(follow(v[0], cxs, new_cxs), v[1], v[2]) for v in vert]
-    horiz = [(follow(h[0], cys, new_cys), h[1], h[2]) for h in horiz]
+    old_cx = [cxs[i] for i in sym]
+    old_cy = [cys[i] for i in sym]
+    vert = [(follow(v[0], old_cx, [new_cxs[i] for i in sym]), v[1], v[2]) for v in vert]
+    horiz = [
+        (follow(h[0], old_cy, [new_cys[i] for i in sym]), h[1], h[2]) for h in horiz
+    ]
     cxs, cys = new_cxs, new_cys
+    _snap_exits_to_free_line_ends(ids, points, cxs, cys, ws, hs, vert, horiz)
 
     boxes: dict[str, _Box] = {}
     gap = _NODE_GAP_EXACT if exact else _NODE_GAP_APPROX
@@ -245,7 +337,7 @@ def _place_nodes(
             cx = mx + (cxs[i] - mx) * spread
             cy = my + (cys[i] - my) * spread
             boxes[nid] = _Box(cx - ws[i] / 2, cy - hs[i] / 2, ws[i], hs[i])
-        items = list(boxes.values())
+        items = [b for nid, b in boxes.items() if nid not in points]
         if not any(
             _too_close(items[i], items[j], gap)
             for i in range(len(items))
@@ -309,6 +401,7 @@ class _Router:
                 b.y + b.h + _INFLATE,
             )
             for nid, b in boxes.items()
+            if b.w > 0 or b.h > 0  # an open arrow end blocks nothing
         }
         self.vguides: list[tuple[float, float, float]] = []
         self.hguides: list[tuple[float, float, float]] = []
@@ -384,6 +477,10 @@ class _Router:
         tol = _ATTACH_TOL
         ports: dict[str, list[_Port]] = {}
         for nid, b in self.boxes.items():
+            if b.w == 0 and b.h == 0:
+                # Open arrow end: arrive from any side, exactly at the point.
+                ports[nid] = [_Port(nid, side, (b.x, b.y), False) for side in PortSide]
+                continue
             hits: list[tuple[PortSide, float]] = []
             for gx, g0, g1 in self.vguides:
                 if b.x - 2 <= gx <= b.x + b.w + 2:

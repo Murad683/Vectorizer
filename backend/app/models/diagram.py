@@ -19,6 +19,10 @@ class ShapeType(str, Enum):
     DECISION = "decision"  # diamond — conditions
     INPUT_OUTPUT = "input_output"  # parallelogram — input / read
     DOCUMENT = "document"  # rectangle with a wavy bottom — print / output ("Çap")
+    # Not a symbol: the open end of an arrow that stops in empty space (the
+    # algorithm continues outside the picture). Drawn as nothing; edges into
+    # it end in a bare arrowhead at its position.
+    EXIT = "exit"
 
 
 class PortSide(str, Enum):

@@ -339,17 +339,22 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
     """Replace the LLM's guessed node boxes with measured ones, via marks.
 
     Every node whose ``mark`` names a detected shape gets that shape's exact
-    box. Only when ALL nodes are matched (one-to-one) is the graph flagged
+    box. Only when ALL symbols are matched (one-to-one) is the graph flagged
     ``boxes_detected`` and given the original connector lines as routing
     guides; otherwise the remaining LLM boxes are kept and the layout runs
-    in its tolerant (approximate-boxes) mode.
+    in its tolerant (approximate-boxes) mode. Open arrow ends (``EXIT``)
+    are not symbols and never take a mark.
     """
     graph.image_width = detection.width
     graph.image_height = detection.height
     w, h = float(detection.width), float(detection.height)
     used: set[int] = set()
     matched = 0
+    symbols = [n for n in graph.nodes if n.shape_type != ShapeType.EXIT]
     for node in graph.nodes:
+        if node.shape_type == ShapeType.EXIT:
+            node.mark = None
+            continue
         mark = node.mark
         if mark is None or not 1 <= mark <= len(detection.shapes) or mark in used:
             continue
@@ -370,7 +375,7 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
             round(s.x1 / w * 1000),
         ]
         matched += 1
-    if graph.nodes and matched == len(graph.nodes):
+    if symbols and matched == len(symbols):
         graph.boxes_detected = True
         graph.guide_segments = [
             [
@@ -381,6 +386,4 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
             ]
             for x0, y0, x1, y1 in detection.segments
         ]
-    logger.info(
-        "Marks matched %d/%d nodes to detected shapes", matched, len(graph.nodes)
-    )
+    logger.info("Marks matched %d/%d symbols to detected shapes", matched, len(symbols))

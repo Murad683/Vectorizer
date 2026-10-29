@@ -148,6 +148,7 @@ def sp_open_exit() -> DiagramGraph:
             ("n4", T.PROCESS, "S = S - 3\nP = P // 10", (101, 194, 277, 255)),
             ("n5", T.DECISION, "P < 10", (99, 280, 271, 351)),
             ("n6", T.PROCESS, "P = P * 3", (313, 282, 489, 342)),
+            ("n7", T.EXIT, "", (522, 380, 532, 390)),
         ],
         [
             _e("n1", "n2"),
@@ -156,6 +157,8 @@ def sp_open_exit() -> DiagramGraph:
             _e("n4", "n5"),
             _e("n5", "n6", "hə", P.RIGHT),
             _e("n5", "n2", "yox", P.LEFT),
+            _e("n3", "n7"),
+            _e("n6", "n7"),
         ],
     )
 

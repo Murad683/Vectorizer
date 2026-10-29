@@ -4,21 +4,32 @@ This is the only module in the codebase allowed to import the Gemini SDK
 (``google-genai``).
 """
 
-import io
 import logging
 import time
 
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
-from PIL import Image
-from pydantic import ValidationError
 
 from app.config import get_settings
-from app.core.diagram_detect import Detection, annotate, apply_detection, detect
+from app.core.diagram_detect import Detection, annotate, detect
 from app.core.vision.base import VisionProvider
-from app.models.diagram import DiagramGraph
+from app.core.vision.debug_dump import DebugDump
+from app.core.vision.postprocess import (
+    attach_geometry,
+    parse_diagram_graph,
+    parse_vision_analysis,
+    pick_better_answer,
+    topology_problems,
+)
 from app.models.document import ContentType, VisionAnalysis, VisionResult
+
+__all__ = [
+    "GeminiVisionProvider",
+    "parse_diagram_graph",
+    "parse_vision_analysis",
+    "topology_problems",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -103,82 +114,6 @@ def _is_transient(exc: Exception) -> bool:
     return isinstance(exc, ConnectionError | TimeoutError)
 
 
-def _normalise_graph(graph: DiagramGraph) -> DiagramGraph | None:
-    """Normalise edge labels; return None if the graph has no nodes."""
-    for edge in graph.edges:
-        if edge.label is not None and not edge.label.strip():
-            edge.label = None
-    if not graph.nodes:
-        return None
-    return graph
-
-
-def parse_diagram_graph(raw_output: str) -> DiagramGraph | None:
-    """Validate a bare DiagramGraph JSON response, or None.
-
-    Retained for direct-graph callers/tests; the envelope path uses
-    ``parse_vision_analysis``.
-    """
-    try:
-        graph = DiagramGraph.model_validate_json(raw_output)
-    except ValidationError:
-        return None
-    return _normalise_graph(graph)
-
-
-def parse_vision_analysis(raw_output: str) -> VisionAnalysis | None:
-    """Validate a VisionAnalysis envelope and its selected payload, or None.
-
-    A response is usable only when the payload matching ``content_type``
-    is present and non-degenerate: a diagram with nodes, or text content
-    with at least one non-empty list.
-    """
-    try:
-        analysis = VisionAnalysis.model_validate_json(raw_output)
-    except ValidationError:
-        return None
-    if analysis.content_type == ContentType.DIAGRAM:
-        if analysis.diagram is None or _normalise_graph(analysis.diagram) is None:
-            return None
-        return analysis
-    if analysis.text_content is None or not any(
-        lst.lines for lst in analysis.text_content.lists
-    ):
-        return None
-    return analysis
-
-
-def topology_problems(graph: DiagramGraph) -> list[str]:
-    """Structural rules every flowchart obeys; violations mean the model
-    missed or invented arrows (most often a loop-back arrow)."""
-    outs: dict[str, int] = {n.id: 0 for n in graph.nodes}
-    ins: dict[str, int] = {n.id: 0 for n in graph.nodes}
-    for e in graph.edges:
-        if e.source_id in outs:
-            outs[e.source_id] += 1
-        if e.target_id in ins:
-            ins[e.target_id] += 1
-    problems: list[str] = []
-    for n in graph.nodes:
-        label = f'"{n.text}" ({n.id})'
-        kind = n.shape_type.value
-        if kind in ("process", "input_output") and outs[n.id] != 1:
-            problems.append(
-                f"{label} is a {kind} symbol with {outs[n.id]} outgoing arrows; "
-                "it must have exactly 1 (check loop-back arrows)"
-            )
-        elif kind == "decision" and outs[n.id] != 2:
-            problems.append(
-                f"{label} is a decision with {outs[n.id]} outgoing arrows; "
-                "it must have exactly 2"
-            )
-        elif kind == "terminator" and outs[n.id] + ins[n.id] == 0:
-            problems.append(f"{label} has no arrows at all")
-        if kind != "terminator" and ins[n.id] == 0:
-            problems.append(f"{label} has no incoming arrow")
-    return problems
-
-
 class GeminiVisionProvider(VisionProvider):
     """Diagram analysis backed by the Google Gemini API (JSON mode)."""
 
@@ -198,8 +133,11 @@ class GeminiVisionProvider(VisionProvider):
 
     def _retry_topology(
         self, contents: list[str | genai_types.Part], problems: list[str]
-    ) -> VisionAnalysis | None:
-        """Single corrective call listing what was structurally wrong."""
+    ) -> tuple[VisionAnalysis | None, str]:
+        """Single corrective call listing what was structurally wrong.
+
+        Returns ``(analysis or None, raw response text)``.
+        """
         fix = (
             "\nYour previous answer for this image was incomplete:\n- "
             + "\n- ".join(problems)
@@ -214,11 +152,12 @@ class GeminiVisionProvider(VisionProvider):
             )
         except Exception:  # noqa: BLE001 - keep the first answer
             logger.exception("Topology retry failed")
-            return None
-        analysis = parse_vision_analysis(response.text or "")
+            return None, ""
+        raw = response.text or ""
+        analysis = parse_vision_analysis(raw)
         if analysis is None or analysis.content_type != ContentType.DIAGRAM:
-            return None
-        return analysis
+            return None, raw
+        return analysis, raw
 
     def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
         """Classify the image and extract it in ONE call.
@@ -228,6 +167,7 @@ class GeminiVisionProvider(VisionProvider):
         ``content_type`` selects ``diagram_graph`` or ``text_content``.
         """
         prompt = _PROMPT
+        dump = DebugDump(image)
         detection: Detection | None = None
         try:
             detection = detect(image)
@@ -250,6 +190,10 @@ class GeminiVisionProvider(VisionProvider):
                 genai_types.Part.from_bytes(data=marked, mime_type="image/png")
             )
         contents.append(prompt)
+        dump.detection(detection)
+        if marked is not None:
+            dump.binary("marked.png", marked)
+        dump.text("prompt.txt", prompt)
 
         last_error: Exception | None = None
         raw_output = ""
@@ -307,34 +251,35 @@ class GeminiVisionProvider(VisionProvider):
                 ),
             )
 
+        dump.text("response.json", raw_output)
+        meta: dict[str, object] = {"model": self._model_name, "context": context}
         if analysis.content_type == ContentType.DIAGRAM and analysis.diagram:
             problems = topology_problems(analysis.diagram)
+            meta["problems"] = problems
             if problems:
                 # One targeted re-ask (only when the answer is provably
                 # incomplete, e.g. a loop-back arrow was left out).
                 logger.warning("Diagram topology incomplete: %s", "; ".join(problems))
-                retry = self._retry_topology(contents, problems)
+                retry, retry_raw = self._retry_topology(contents, problems)
+                dump.text("retry.json", retry_raw)
+                analysis, kept = pick_better_answer(analysis, retry)
+                meta["retry_kept"] = kept
                 if retry is not None and retry.diagram is not None:
-                    still = topology_problems(retry.diagram)
-                    if len(still) < len(problems):
-                        analysis, raw_output = retry, retry.model_dump_json()
-                        if still:
-                            logger.warning(
-                                "Topology still incomplete: %s", "; ".join(still)
-                            )
+                    meta["retry_problems"] = topology_problems(retry.diagram)
+                if kept:
+                    raw_output = retry_raw
+                    still = meta["retry_problems"]
+                    if still:
+                        logger.warning("Topology still incomplete: %s", still)
+        dump.json("meta.json", meta)
 
         note = f"Generated by {self._model_name}."
         if analysis.content_type == ContentType.DIAGRAM:
-            if analysis.diagram is not None and detection is not None and marked:
-                apply_detection(analysis.diagram, detection)
-            elif analysis.diagram is not None:
-                # box_2d is normalised; the layout needs the aspect ratio.
-                try:
-                    with Image.open(io.BytesIO(image)) as img:
-                        analysis.diagram.image_width = img.width
-                        analysis.diagram.image_height = img.height
-                except Exception:  # noqa: BLE001 - boxes then fall back to Graphviz
-                    logger.warning("Could not read image size for box layout")
+            if analysis.diagram is not None:
+                attach_geometry(
+                    analysis.diagram, image, detection, marked=marked is not None
+                )
+                dump.text("graph.json", analysis.diagram.model_dump_json(indent=2))
             return VisionResult(
                 raw_model_output=raw_output,
                 content_type=ContentType.DIAGRAM,

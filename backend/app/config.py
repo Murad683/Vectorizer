@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 30
     max_pages_per_file: int = 50
     frontend_origin: str = "http://localhost:5173"
+    # Dev aid: when set, every vision call saves its image, prompt, raw model
+    # output and measured geometry under this directory, so layout/render can
+    # be replayed offline (scripts/replay_diagram.py) without a new API call.
+    debug_dump_dir: str = ""
 
     jwt_secret: str = ""
     admin_email: str = ""

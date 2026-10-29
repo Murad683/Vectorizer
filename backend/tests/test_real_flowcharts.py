@@ -51,6 +51,41 @@ def test_broken_diamond_outline_is_recovered_at_full_size() -> None:
 
 @pytest.mark.parametrize("name", ["fahrenheit_celsius", "sp_open_exit", "sum_loop"])
 def test_framed_only_diagrams_use_exact_geometry(name: str) -> None:
-    graph, lg = run_fixture(name)
+    graph, _ = run_fixture(name)
     assert graph.boxes_detected
+
+
+@pytest.mark.parametrize("name", list(FIXTURES))
+def test_no_visual_defects(name: str) -> None:
+    _, lg = run_fixture(name)
     assert quality_issues(lg) == []
+
+
+def test_quadratic_routes_like_the_source() -> None:
+    """Both print blocks reach "Son" from the LEFT and merge there; the
+    "hə" branch of D > 0 leaves to the right, outside D = 0's branch — the
+    Word result used to send 8 -> Son right, across the D > 0 line."""
+    _, lg = run_fixture("quadratic_equation")
+    son = lg.node_by_id("n11")
+    for src in ("n6", "n8"):
+        e = next(e for e in lg.edges if e.source_id == src and e.target_id == "n11")
+        assert e.edge_path is not None
+        assert e.edge_path[-1][0] == pytest.approx(son.x)  # enters the left side
+        assert min(p[0] for p in e.edge_path) < son.x
+    outer = next(e for e in lg.edges if e.source_id == "n4" and e.target_id == "n9")
+    inner = next(e for e in lg.edges if e.source_id == "n5" and e.target_id == "n7")
+    assert outer.edge_path is not None and inner.edge_path is not None
+    d4 = lg.node_by_id("n4")
+    assert outer.edge_path[0][0] == pytest.approx(d4.x + d4.width)  # right tip
+    assert max(p[0] for p in outer.edge_path) > max(p[0] for p in inner.edge_path)
+
+
+def test_loop_lands_on_the_connector_into_the_decision() -> None:
+    """``P < 10`` "yox" goes up the left and enters ``S < 0`` from the top,
+    where the source draws it landing on the incoming connector."""
+    _, lg = run_fixture("sp_open_exit")
+    loop = next(e for e in lg.edges if e.source_id == "n5" and e.target_id == "n2")
+    target = lg.node_by_id("n2")
+    assert loop.edge_path is not None
+    assert loop.edge_path[-1][1] == pytest.approx(target.y)
+    assert min(p[0] for p in loop.edge_path) < target.x

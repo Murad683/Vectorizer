@@ -47,7 +47,15 @@ _STUB = 12.0
 _INFLATE = 4.0
 _BEND_COST = 100.0
 _OVERLAP_COST_PER_PX = 3.0
-_CROSS_COST = 150.0
+_CROSS_COST = 400.0
+# Soft clearance: a line closer than this to an unrelated symbol (or running
+# parallel this close to another edge's line) still routes, but pays per px,
+# so a clear corridor wins whenever one exists.
+_CLEARANCE = 12.0
+_NEAR_NODE_COST_PER_PX = 4.0
+_NEAR_LINE_COST_PER_PX = 2.0
+_RIPUP_ROUNDS = 8
+_HINT_MISMATCH_COST = 250.0  # leaving a decision on another side than seen
 _GUIDE_FACTOR = 0.05
 _GUIDE_BEND_COST = 10.0
 _MARGIN = 20.0
@@ -442,11 +450,15 @@ class _Router:
         self.ys = sorted(ys)
         self.xi = {v: i for i, v in enumerate(self.xs)}
         self.yi = {v: i for i, v in enumerate(self.ys)}
-        # Segments already used by routed edges: (x0, y0, x1, y1, target_id),
-        # x0<=x1, y0<=y1.
-        self.used: list[tuple[float, float, float, float, str]] = []
+        # Segments already used by routed edges:
+        # (x0, y0, x1, y1, target_id, edge_key), x0<=x1, y0<=y1.
+        self.used: list[tuple[float, float, float, float, str, int]] = []
         self.port_use: dict[tuple[str, float, float], dict[str, int]] = {}
         self.side_out: dict[tuple[str, PortSide], int] = {}
+        # The edge being routed: its own end symbols are exempt from the
+        # clearance penalty (a line must touch them).
+        self._ends: tuple[str, str] = ("", "")
+        self.last_cost = 0.0  # cost of the route() result just returned
 
     # -- ports --------------------------------------------------------------
     def _outline_point(self, nid: str, side: PortSide, along: float) -> Point:
@@ -494,6 +506,22 @@ class _Router:
                         hits.append((PortSide.LEFT, gy))
                     if abs(g0 - (b.x + b.w)) < tol:
                         hits.append((PortSide.RIGHT, gy))
+            # An arrow drawn onto the connector just outside a side (e.g. a
+            # loop landing on the line into a decision's top) is evidence for
+            # that side's centre: lines ending there arrive through it.
+            reach = 3 * tol
+            for gy, g0, g1 in self.hguides:
+                if any(abs(end - b.cx) < tol for end in (g0, g1)):
+                    if b.y - reach < gy < b.y:
+                        hits.append((PortSide.TOP, b.cx))
+                    if b.y + b.h < gy < b.y + b.h + reach:
+                        hits.append((PortSide.BOTTOM, b.cx))
+            for gx, g0, g1 in self.vguides:
+                if any(abs(end - b.cy) < tol for end in (g0, g1)):
+                    if b.x - reach < gx < b.x:
+                        hits.append((PortSide.LEFT, b.cy))
+                    if b.x + b.w < gx < b.x + b.w + reach:
+                        hits.append((PortSide.RIGHT, b.cy))
             plist: list[_Port] = []
             for side in PortSide:
                 mid = b.cx if side in (PortSide.TOP, PortSide.BOTTOM) else b.cy
@@ -556,33 +584,58 @@ class _Router:
         lo_y, hi_y = min(p[1], q[1]), max(p[1], q[1])
         vertical = abs(p[0] - q[0]) < 0.01
         cost = 0.0
-        for ux0, uy0, ux1, uy1, u_target in self.used:
+        for ux0, uy0, ux1, uy1, u_target, _ in self.used:
             if u_target == target:
                 continue  # edges into the same node may merge freely
             u_vertical = abs(ux0 - ux1) < 0.01
             if vertical and u_vertical:
-                if abs(ux0 - p[0]) < 1.0:
-                    cost += _OVERLAP_COST_PER_PX * max(
-                        0.0, min(hi_y, uy1) - max(lo_y, uy0)
-                    )
+                gap = abs(ux0 - p[0])
+                run = max(0.0, min(hi_y, uy1) - max(lo_y, uy0))
+                if gap < 1.0:
+                    cost += _OVERLAP_COST_PER_PX * run
+                elif gap < _CLEARANCE:
+                    cost += _NEAR_LINE_COST_PER_PX * run
             elif not vertical and not u_vertical:
-                if abs(uy0 - p[1]) < 1.0:
-                    cost += _OVERLAP_COST_PER_PX * max(
-                        0.0, min(hi_x, ux1) - max(lo_x, ux0)
-                    )
+                gap = abs(uy0 - p[1])
+                run = max(0.0, min(hi_x, ux1) - max(lo_x, ux0))
+                if gap < 1.0:
+                    cost += _OVERLAP_COST_PER_PX * run
+                elif gap < _CLEARANCE:
+                    cost += _NEAR_LINE_COST_PER_PX * run
+            # Perpendicular: half-open along the step, so a crossing that
+            # falls exactly on a grid vertex (where the path is split into
+            # two steps) is charged exactly once instead of never.
             elif vertical:  # p-q vertical, u horizontal
-                if lo_y < uy0 < hi_y and ux0 < p[0] < ux1:
+                if lo_y <= uy0 < hi_y and ux0 < p[0] < ux1:
                     cost += _CROSS_COST
             else:
-                if lo_x < ux0 < hi_x and uy0 < p[1] < uy1:
+                if lo_x <= ux0 < hi_x and uy0 < p[1] < uy1:
                     cost += _CROSS_COST
         return cost
+
+    def _near_nodes(self, p: Point, q: Point) -> float:
+        """Length of the segment running inside other symbols' clearance."""
+        lo_x, hi_x = min(p[0], q[0]), max(p[0], q[0])
+        lo_y, hi_y = min(p[1], q[1]), max(p[1], q[1])
+        total = 0.0
+        for nid, b in self.boxes.items():
+            if nid in self._ends or (b.w == 0 and b.h == 0):
+                continue
+            x0, y0 = b.x - _CLEARANCE, b.y - _CLEARANCE
+            x1, y1 = b.x + b.w + _CLEARANCE, b.y + b.h + _CLEARANCE
+            if hi_x - lo_x < 0.01:  # vertical
+                if x0 < lo_x < x1:
+                    total += max(0.0, min(hi_y, y1) - max(lo_y, y0))
+            elif y0 < lo_y < y1:
+                total += max(0.0, min(hi_x, x1) - max(lo_x, x0))
+        return total
 
     def _step_cost(self, p: Point, q: Point, target: str) -> float:
         length = abs(q[0] - p[0]) + abs(q[1] - p[1])
         if self._on_guide(p, q):
             length *= _GUIDE_FACTOR
-        return length + self._penalty(p, q, target)
+        near = _NEAR_NODE_COST_PER_PX * self._near_nodes(p, q)
+        return length + near + self._penalty(p, q, target)
 
     def _port_penalty(
         self,
@@ -594,7 +647,7 @@ class _Router:
         pen = 0.0
         normal = _SIDE_NORMAL[port.side]
         if hint is not None and port.side != hint:
-            pen += 120.0
+            pen += _HINT_MISMATCH_COST
         if (
             toward is not None
             and hint is None
@@ -623,6 +676,7 @@ class _Router:
         self, edge: DiagramEdge, is_back: bool
     ) -> tuple[float, list[Point], _Port, _Port] | None:
         """Cheapest single straight segment between facing, aligned ports."""
+        self._ends = (edge.source_id, edge.target_id)
         sb, tb = self.boxes[edge.source_id], self.boxes[edge.target_id]
         to_target = (tb.cx - sb.cx, tb.cy - sb.cy)
         best: tuple[float, list[Point], _Port, _Port] | None = None
@@ -659,6 +713,7 @@ class _Router:
         is_back: bool,
     ) -> tuple[list[Point], _Port, _Port] | None:
         """Route one edge; returns (polyline, source_port, target_port)."""
+        self._ends = (edge.source_id, edge.target_id)
         sb, tb = self.boxes[edge.source_id], self.boxes[edge.target_id]
         to_target = (tb.cx - sb.cx, tb.cy - sb.cy)
         to_source = (-to_target[0], -to_target[1])
@@ -750,6 +805,7 @@ class _Router:
                     start_port[nst] = start_port[st]
                     heapq.heappush(heap, (ng + h(there), ng, nst))
 
+        self.last_cost = best_cost
         if best is None:
             if direct is not None:
                 return direct[1], direct[2], direct[3]
@@ -765,7 +821,14 @@ class _Router:
         path = [sport.point, *pts, tport.point]
         return _simplify(path), sport, tport
 
-    def commit(self, edge: DiagramEdge, path: list[Point], s: _Port, t: _Port) -> None:
+    def commit(
+        self,
+        edge: DiagramEdge,
+        path: list[Point],
+        s: _Port,
+        t: _Port,
+        key: int = -1,
+    ) -> None:
         """Record a routed edge so later edges avoid/penalise it."""
         for p, q in zip(path, path[1:], strict=False):
             self.used.append(
@@ -775,13 +838,65 @@ class _Router:
                     max(p[0], q[0]),
                     max(p[1], q[1]),
                     edge.target_id,
+                    key,
                 )
             )
+        self._count(s, t, +1)
+
+    def path_cost(
+        self, edge: DiagramEdge, path: list[Point], s: _Port, t: _Port, is_back: bool
+    ) -> float:
+        """What ``route`` would charge for an existing ``path`` right now
+        (same terms: ports, length, clearance, conflicts, bends)."""
+        self._ends = (edge.source_id, edge.target_id)
+        sb, tb = self.boxes[edge.source_id], self.boxes[edge.target_id]
+        to_target = (tb.cx - sb.cx, tb.cy - sb.cy)
+        cost = self._port_penalty(
+            s, "out", edge.source_port, None if is_back else to_target
+        )
+        cost += self._port_penalty(
+            t, "in", None, None if is_back else (-to_target[0], -to_target[1])
+        )
+        for p, q in zip(path, path[1:], strict=False):
+            cost += self._step_cost(p, q, edge.target_id)
+        return cost + _BEND_COST * max(0, len(path) - 2)
+
+    def uncommit(self, key: int, s: _Port, t: _Port) -> None:
+        """Forget a routed edge (for rip-up and re-route)."""
+        self.used = [u for u in self.used if u[5] != key]
+        self._count(s, t, -1)
+
+    def _count(self, s: _Port, t: _Port, delta: int) -> None:
         self.port_use.setdefault(s.key, {}).setdefault("out", 0)
-        self.port_use[s.key]["out"] += 1
+        self.port_use[s.key]["out"] += delta
         self.port_use.setdefault(t.key, {}).setdefault("in", 0)
-        self.port_use[t.key]["in"] += 1
-        self.side_out[(s.node, s.side)] = self.side_out.get((s.node, s.side), 0) + 1
+        self.port_use[t.key]["in"] += delta
+        side = (s.node, s.side)
+        self.side_out[side] = self.side_out.get(side, 0) + delta
+
+
+def _conflicts(path: list[Point], others: list[list[Point]]) -> int:
+    """Crossings and collinear overlaps between ``path`` and ``others``."""
+    count = 0
+    for a, b in zip(path, path[1:], strict=False):
+        va = abs(a[0] - b[0]) < 0.5
+        for other in others:
+            for c, d in zip(other, other[1:], strict=False):
+                vc = abs(c[0] - d[0]) < 0.5
+                if va == vc:
+                    k = 0 if va else 1
+                    if abs(a[k] - c[k]) < 1:
+                        lo = max(min(a[1 - k], b[1 - k]), min(c[1 - k], d[1 - k]))
+                        hi = min(max(a[1 - k], b[1 - k]), max(c[1 - k], d[1 - k]))
+                        count += hi - lo > 1
+                    continue
+                v, h = ((a, b), (c, d)) if va else ((c, d), (a, b))
+                x, y = v[0][0], h[0][1]
+                count += (
+                    min(h[0][0], h[1][0]) + 0.5 < x < max(h[0][0], h[1][0]) - 0.5
+                    and min(v[0][1], v[1][1]) + 0.5 < y < max(v[0][1], v[1][1]) - 0.5
+                )
+    return count
 
 
 def _simplify(path: list[Point]) -> list[Point]:
@@ -878,6 +993,56 @@ def _place_labels(
     return result
 
 
+def _rip_up_conflicts(
+    router: _Router,
+    edges: list[DiagramEdge],
+    routed: dict[int, tuple[list[Point], bool]],
+    ports: dict[int, tuple[_Port, _Port]],
+) -> None:
+    """Re-route edges that cross or overlap an unrelated edge.
+
+    Edges are routed one by one, so an early edge cannot see the ones
+    routed after it. Each round tries re-routing every conflicting edge
+    with all others in place and applies the single best fix: the largest
+    drop in conflicts, then the smallest extra cost — so the edge that can
+    move cheaply (e.g. a long line into "Son") moves, not the decision
+    branch that would have to leave on the wrong side.
+    """
+
+    def others(i: int) -> list[list[Point]]:
+        return [
+            path
+            for j, (path, _) in routed.items()
+            if j != i and edges[j].target_id != edges[i].target_id
+        ]
+
+    for _ in range(_RIPUP_ROUNDS):
+        best: tuple[int, float, int, tuple[list[Point], _Port, _Port]] | None = None
+        for i in sorted(ports):
+            path, back = routed[i]
+            before = _conflicts(path, others(i))
+            if not before:
+                continue
+            s_port, t_port = ports[i]
+            router.uncommit(i, s_port, t_port)
+            old_cost = router.path_cost(edges[i], path, s_port, t_port, back)
+            result = router.route(edges[i], back)
+            extra = router.last_cost - old_cost
+            router.commit(edges[i], path, s_port, t_port, key=i)
+            if result is None:
+                continue
+            gain = before - _conflicts(result[0], others(i))
+            if gain > 0 and (best is None or (-gain, extra) < (-best[0], best[1])):
+                best = (gain, extra, i, result)
+        if best is None:
+            return
+        _, _, i, (path, s_port, t_port) = best
+        router.uncommit(i, *ports[i])
+        router.commit(edges[i], path, s_port, t_port, key=i)
+        routed[i] = (path, routed[i][1])
+        ports[i] = (s_port, t_port)
+
+
 def layout_from_boxes(graph: DiagramGraph) -> LayoutedGraph | None:
     """Lay out ``graph`` using the source image's own node positions.
 
@@ -904,6 +1069,7 @@ def layout_from_boxes(graph: DiagramGraph) -> LayoutedGraph | None:
     order = sorted(range(len(valid)), key=lambda i: (is_back(valid[i]), i))
 
     routed: dict[int, tuple[list[Point], bool]] = {}
+    ports: dict[int, tuple[_Port, _Port]] = {}
     for i in order:
         e = valid[i]
         back = is_back(e)
@@ -915,8 +1081,10 @@ def layout_from_boxes(graph: DiagramGraph) -> LayoutedGraph | None:
             logger.warning("No route for edge %s->%s", e.source_id, e.target_id)
             continue
         path, s_side, t_side = result
-        router.commit(e, path, s_side, t_side)
+        router.commit(e, path, s_side, t_side, key=i)
         routed[i] = (path, back)
+        ports[i] = (s_side, t_side)
+    _rip_up_conflicts(router, valid, routed, ports)
 
     labels = _place_labels(
         [

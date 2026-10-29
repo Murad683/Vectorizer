@@ -196,8 +196,11 @@ def _find_gapped_shapes(ink: _Image, found: list[_Shape]) -> list[_Shape]:
     k = _GAP_CLOSE
     closed = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
     extra: list[_Shape] = []
+    # A recovered symbol is a real symbol with a broken outline, so it is in
+    # the same size class as the intact ones (not a sliver between arrows).
+    min_area = 0.4 * float(np.median([s[2] * s[3] for s in found])) if found else 0.0
     for cand in _find_shapes(closed):
-        if any(_overlaps(cand, s) for s in found):
+        if any(_overlaps(cand, s) for s in found) or cand[2] * cand[3] < min_area:
             continue
         x, y, w, h, fill, kind = cand
         cx, cy = x + w // 2, y + h // 2
@@ -216,6 +219,56 @@ def _find_gapped_shapes(ink: _Image, found: list[_Shape]) -> list[_Shape]:
         extra.append((x - left, y - top, nw, nh, fill, kind))
         logger.info("Recovered a symbol with a broken outline at %s", (x, y, w, h))
     return extra
+
+
+def _drop_enclosures(shapes: list[_Shape], ink: _Image) -> list[_Shape]:
+    """Remove empty areas walled in by connector lines between symbols.
+
+    Two parallel arrows between two symbols enclose a convex white area
+    that looks like a symbol interior. Real symbols never touch each other,
+    while such an enclosure always touches (or overlaps) the two or more
+    symbols its walls connect. A sliver cut off between an arrow and a
+    diamond's slanted side lies mostly inside that diamond's box, or is a
+    small EMPTY area (a real empty symbol is as large as its neighbours).
+    """
+    if not shapes:
+        return shapes
+    median_area = float(np.median([s[2] * s[3] for s in shapes]))
+
+    def small_and_empty(a: _Shape) -> bool:
+        x, y, w, h = a[0] + 3, a[1] + 3, a[2] - 6, a[3] - 6
+        if w <= 0 or h <= 0:
+            return True
+        inked = int(np.count_nonzero(ink[y : y + h, x : x + w]))
+        return a[2] * a[3] < 0.4 * median_area and inked < 0.005 * w * h
+
+    pad = 8  # work px: two outlines + a little
+
+    def touches(a: _Shape, b: _Shape) -> bool:
+        return (
+            a[0] - pad < b[0] + b[2]
+            and b[0] - pad < a[0] + a[2]
+            and a[1] - pad < b[1] + b[3]
+            and b[1] - pad < a[1] + a[3]
+        )
+
+    def mostly_inside(a: _Shape, b: _Shape) -> bool:
+        ix = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+        iy = max(0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+        return b[2] * b[3] > a[2] * a[3] and ix * iy > 0.5 * a[2] * a[3]
+
+    keep = []
+    for a in shapes:
+        others = [b for b in shapes if b is not a]
+        if (
+            sum(touches(a, b) for b in others) >= 2
+            or any(mostly_inside(a, b) for b in others)
+            or small_and_empty(a)
+        ):
+            logger.info("Dropped a line-walled enclosure at %s", a[:4])
+            continue
+        keep.append(a)
+    return keep
 
 
 def _find_segments(
@@ -271,8 +324,9 @@ def detect(image: bytes) -> Detection | None:
     work = cv2.resize(img, None, fx=factor, fy=factor, interpolation=interp)
     ink = _binarise(work)
     shapes = _find_shapes(ink)
-    shapes = sorted(
-        shapes + _find_gapped_shapes(ink, shapes), key=lambda s: (s[1], s[0])
+    shapes = _drop_enclosures(
+        sorted(shapes + _find_gapped_shapes(ink, shapes), key=lambda s: (s[1], s[0])),
+        ink,
     )
     segments = _find_segments(ink, shapes)
 

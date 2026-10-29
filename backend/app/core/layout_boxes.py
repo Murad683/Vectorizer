@@ -29,7 +29,11 @@ import statistics
 from dataclasses import dataclass
 
 from app.core.rich_text import display_lines
-from app.core.shape_geometry import DOCUMENT_TEXT_BOTTOM, document_bottom
+from app.core.shape_geometry import (
+    DOCUMENT_TEXT_BOTTOM,
+    PREPARATION_INSET,
+    document_bottom,
+)
 from app.models.diagram import (
     DiagramEdge,
     DiagramGraph,
@@ -120,6 +124,7 @@ _SHAPE_MIN = {
     "input_output": (130.0, 44.0),
     "document": (130.0, 44.0),
     "decision": (150.0, 80.0),
+    "preparation": (150.0, 44.0),
 }
 
 
@@ -138,6 +143,8 @@ def _min_size(
     if shape == "decision":
         needed *= 1.6  # text must fit inside the diamond's inner area
         height += (n_lines - 1) * 16.0
+    elif shape == "preparation":
+        needed /= 1 - 2 * PREPARATION_INSET  # text sits between the points
     elif shape == "document":
         height /= DOCUMENT_TEXT_BOTTOM  # text sits above the wave
     return max(base_w, needed), height
@@ -166,6 +173,31 @@ def _too_close(a: _Box, b: _Box, gap: float) -> bool:
     gx = max(a.x - (b.x + b.w), b.x - (a.x + a.w))
     gy = max(a.y - (b.y + b.h), b.y - (a.y + a.h))
     return gx < gap and gy < gap
+
+
+def _weld_corners(
+    vert: list[tuple[float, float, float]], horiz: list[tuple[float, float, float]]
+) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    """Make the author's corners exact: a vertical line ending a pixel or two
+    from a horizontal line (and vice versa) is snapped onto it. Measured
+    ends differ by the line thickness; a spacing cut placed between the two
+    values would otherwise tear the corner apart (seen: a loop corner in the
+    gap above a decision, so the loop lost its way onto the connector)."""
+    tol = 4.0
+
+    def snap(v: float, others: list[float]) -> float:
+        best = min(others, key=lambda o: abs(o - v), default=v)
+        return best if abs(best - v) <= tol else v
+
+    welded_v = []
+    for x, y0, y1 in vert:
+        rows = [y for y, a, b in horiz if a - tol <= x <= b + tol]
+        welded_v.append((x, snap(y0, rows), snap(y1, rows)))
+    welded_h = []
+    for y, x0, x1 in horiz:
+        cols = [x for x, a, b in welded_v if a - tol <= y <= b + tol]
+        welded_h.append((y, snap(x0, cols), snap(x1, cols)))
+    return welded_v, welded_h
 
 
 def _guess_exit_box(graph: DiagramGraph, exit_id: str) -> list[int] | None:
@@ -353,6 +385,7 @@ def _place_nodes(
         (follow(h[0], old_cy, [new_cys[i] for i in sym]), h[1], h[2]) for h in horiz
     ]
     cxs, cys = new_cxs, new_cys
+    vert, horiz = _weld_corners(vert, horiz)
     _snap_exits_to_free_line_ends(ids, points, cxs, cys, ws, hs, vert, horiz)
 
     boxes: dict[str, _Box] = {}
@@ -480,10 +513,12 @@ class _Router:
         guides: list[Segment],
         diamonds: set[str] | None = None,
         documents: set[str] | None = None,
+        hexagons: set[str] | None = None,
     ) -> None:
         self.boxes = boxes
         self.diamonds = diamonds or set()
         self.documents = documents or set()
+        self.hexagons = hexagons or set()
         self.obstacles = {
             nid: (
                 b.x - _INFLATE,
@@ -546,12 +581,20 @@ class _Router:
     # -- ports --------------------------------------------------------------
     def _outline_point(self, nid: str, side: PortSide, along: float) -> Point:
         """Border point on ``side`` at coordinate ``along`` (x for top/bottom,
-        y for left/right); follows the slanted outline of a diamond and the
-        wavy bottom of a document symbol."""
+        y for left/right); follows the slanted outline of a diamond or of a
+        preparation hexagon's pointed ends, and the wavy bottom of a document
+        symbol."""
         b = self.boxes[nid]
+        inset = PREPARATION_INSET * b.w
         if side in (PortSide.TOP, PortSide.BOTTOM):
             x = min(max(along, b.x), b.x + b.w)
-            if nid in self.diamonds:
+            if nid in self.hexagons and inset > 0:
+                # Flat between the points; on the slanted ends it drops
+                # linearly to the middle height at the tip.
+                t = min((x - b.x) / inset, (b.x + b.w - x) / inset, 1.0)
+                dy = (b.h / 2) * t
+                y = b.cy - dy if side == PortSide.TOP else b.cy + dy
+            elif nid in self.diamonds:
                 dy = (b.h / 2) * (1 - min(abs(x - b.cx) / (b.w / 2), 1.0))
                 y = b.cy - dy if side == PortSide.TOP else b.cy + dy
             elif nid in self.documents and side == PortSide.BOTTOM:
@@ -560,7 +603,10 @@ class _Router:
                 y = b.y if side == PortSide.TOP else b.y + b.h
             return (x, y)
         y = min(max(along, b.y), b.y + b.h)
-        if nid in self.diamonds:
+        if nid in self.hexagons:
+            dx = inset * min(abs(y - b.cy) / (b.h / 2), 1.0)
+            x = b.x + dx if side == PortSide.LEFT else b.x + b.w - dx
+        elif nid in self.diamonds:
             dx = (b.w / 2) * (1 - min(abs(y - b.cy) / (b.h / 2), 1.0))
             x = b.cx - dx if side == PortSide.LEFT else b.cx + dx
         else:
@@ -713,9 +759,29 @@ class _Router:
                 total += max(0.0, min(hi_x, x1) - max(lo_x, x0))
         return total
 
+    def _along_same_target(self, p: Point, q: Point, target: str) -> bool:
+        """True if the step retraces a routed line into the same symbol."""
+        vertical = abs(p[0] - q[0]) < 0.01
+        lo = min(p[1], q[1]) if vertical else min(p[0], q[0])
+        hi = max(p[1], q[1]) if vertical else max(p[0], q[0])
+        for ux0, uy0, ux1, uy1, u_target, _ in self.used:
+            if u_target != target:
+                continue
+            if vertical:
+                same_line = abs(ux0 - ux1) < 0.01 and abs(ux0 - p[0]) < 1.0
+                start, end = uy0, uy1
+            else:
+                same_line = abs(uy0 - uy1) < 0.01 and abs(uy0 - p[1]) < 1.0
+                start, end = ux0, ux1
+            if same_line and start - 0.5 <= lo and hi <= end + 0.5:
+                return True
+        return False
+
     def _step_cost(self, p: Point, q: Point, target: str) -> float:
         length = abs(q[0] - p[0]) + abs(q[1] - p[1])
-        if self._on_guide(p, q):
+        # The author's lines, and the line already drawn into the same
+        # symbol (joining it is how textbooks merge arrows), are cheap.
+        if self._on_guide(p, q) or self._along_same_target(p, q, target):
             length *= _GUIDE_FACTOR
         near = _NEAR_NODE_COST_PER_PX * self._near_nodes(p, q)
         return length + near + self._penalty(p, q, target)
@@ -1240,7 +1306,8 @@ def layout_from_boxes(graph: DiagramGraph) -> LayoutedGraph | None:
 
     diamonds = {n.id for n in graph.nodes if n.shape_type.value == "decision"}
     documents = {n.id for n in graph.nodes if n.shape_type.value == "document"}
-    router = _Router(boxes, guides, diamonds, documents)
+    hexagons = {n.id for n in graph.nodes if n.shape_type.value == "preparation"}
+    router = _Router(boxes, guides, diamonds, documents, hexagons)
 
     def is_back(e: DiagramEdge) -> bool:
         s, t = boxes[e.source_id], boxes[e.target_id]

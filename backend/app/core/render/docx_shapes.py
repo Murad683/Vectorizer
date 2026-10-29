@@ -55,6 +55,7 @@ SHAPE_TYPE_TO_PRST: dict[ShapeType, str] = {
     ShapeType.DECISION: "diamond",
     ShapeType.INPUT_OUTPUT: "parallelogram",
     ShapeType.DOCUMENT: "flowChartDocument",
+    ShapeType.PREPARATION: "flowChartPreparation",
 }
 
 _EMU_PER_PX = 9525

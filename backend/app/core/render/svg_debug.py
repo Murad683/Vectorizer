@@ -9,7 +9,7 @@ import html
 import logging
 
 from app.core.rich_text import display_text
-from app.core.shape_geometry import document_outline
+from app.core.shape_geometry import document_outline, preparation_outline
 from app.models.diagram import DiagramEdge, LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,10 @@ def _shape_svg(node: LayoutedNode) -> str:
     if node.shape_type == ShapeType.INPUT_OUTPUT:
         skew = h * 0.35
         points = f"{x + skew},{y} {x + w},{y} " f"{x + w - skew},{y + h} {x},{y + h}"
+        return f'<polygon points="{points}" {style}/>'
+    if node.shape_type == ShapeType.PREPARATION:
+        hexagon = preparation_outline()
+        points = " ".join(f"{x + fx * w},{y + fy * h}" for fx, fy in hexagon)
         return f'<polygon points="{points}" {style}/>'
     if node.shape_type == ShapeType.DOCUMENT:
         points = " ".join(f"{x + fx * w},{y + fy * h}" for fx, fy in document_outline())

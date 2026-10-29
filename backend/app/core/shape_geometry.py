@@ -16,6 +16,16 @@ _P3 = (0.0, 20172 / 21600)
 # Bottom of the preset's text rectangle, as a fraction of the height.
 DOCUMENT_TEXT_BOTTOM = 17322 / 21600
 
+# flowChartPreparation (ECMA-376): a hexagon whose left and right points are
+# set in by 2/10 of the width; its text rectangle spans 2/10 .. 8/10.
+PREPARATION_INSET = 0.2
+
+
+def preparation_outline() -> list[tuple[float, float]]:
+    """Closed hexagon outline as unit-box fractions (top-left origin)."""
+    i = PREPARATION_INSET
+    return [(0.0, 0.5), (i, 0.0), (1 - i, 0.0), (1.0, 0.5), (1 - i, 1.0), (i, 1.0)]
+
 
 def _bezier(t: float) -> tuple[float, float]:
     u = 1.0 - t

@@ -23,6 +23,7 @@ from app.core.classifier import classify_elements
 from app.core.ingestion import get_extractor
 from app.core.queue.models import JobStatus
 from app.core.queue.store import JobStore
+from app.core.vision.cache import CachedVisionProvider
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +36,20 @@ def _process_job_sync(input_path: str, output_dir: Path) -> tuple[str, str]:
 
     This is the SAME pipeline as ``scripts/assemble_document.py`` —
     extract → classify → assemble, with vision called inside the
-    assemblers for DIAGRAM elements. No pipeline code is modified.
+    assemblers for DIAGRAM elements. Both assemblers share one cached
+    provider, so each diagram image costs ONE vision call per job.
     """
     source = Path(input_path)
     classified = classify_elements(get_extractor(source).extract(source))
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    document = assemble_docx(classified)
+    vision = CachedVisionProvider()
+    document = assemble_docx(classified, vision_provider=vision)
     docx_path = output_dir / "output.docx"
     document.save(str(docx_path))
 
-    prs = assemble_pptx(classified)
+    prs = assemble_pptx(classified, vision_provider=vision)
     pptx_path = output_dir / "output.pptx"
     prs.save(str(pptx_path))
 

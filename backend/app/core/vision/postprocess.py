@@ -91,6 +91,8 @@ def topology_problems(graph: DiagramGraph) -> list[str]:
     - exit (open arrow end): none, and at least 1 in;
     - every symbol is entered, except the entry point: a start terminator,
       or — in a fragment drawn without terminators — the first symbol;
+    - a fragment drawn without terminators and without an open arrow end
+      may stop at exactly one block that has no outgoing arrow;
     - no arrow from a symbol to itself (seen when a model "fixed" a missing
       arrow by inventing one).
     """
@@ -108,11 +110,29 @@ def topology_problems(graph: DiagramGraph) -> list[str]:
     # Without a start terminator the drawing is a fragment; its entry is
     # the first symbol in reading order (ids follow reading order).
     entry = graph.nodes[0].id if graph.nodes and not has_start else None
+    # Likewise a fragment may simply stop: drawn without any terminator and
+    # without an open arrow end, ONE entered block without an outgoing arrow
+    # is its last step (seen live: a test question ending at the print
+    # block "S"). Two such blocks still mean a missing arrow, and a drawing
+    # that has "Başlanğıc" is expected to reach "Son".
+    has_end = any(n.shape_type.value in ("terminator", "exit") for n in graph.nodes)
+    sinks = [
+        n.id
+        for n in graph.nodes
+        if n.shape_type.value in ("process", "input_output", "document")
+        and outs[n.id] == 0
+        and ins[n.id] > 0
+    ]
+    last = sinks[0] if not has_end and len(sinks) == 1 else None
     problems: list[str] = []
     for n in graph.nodes:
         label = f'"{n.text}" ({n.id})'
         kind = n.shape_type.value
-        if kind in ("process", "input_output", "document") and outs[n.id] != 1:
+        if (
+            kind in ("process", "input_output", "document")
+            and outs[n.id] != 1
+            and n.id != last
+        ):
             problems.append(
                 f"{label} is a {kind} symbol with {outs[n.id]} outgoing arrows; "
                 "it must have exactly 1 (check loop-back arrows and arrows "

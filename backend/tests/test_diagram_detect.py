@@ -163,8 +163,11 @@ def test_loop_follows_the_original_outer_route() -> None:
     assert lg is not None
     loop = next(e for e in lg.edges if e.source_id == "n8")
     rightmost = max(n.x + n.width for n in lg.nodes)
-    # Like the source: around the right of every symbol, into the top.
+    # Like the source: around the right of every symbol, ending with its own
+    # arrowhead on the connector just above the decision.
     assert max(p[0] for p in loop.edge_path or []) > rightmost
     decision = next(n for n in lg.nodes if n.id == "n4")
     assert loop.edge_path is not None
-    assert loop.edge_path[-1][1] == pytest.approx(decision.y, abs=1)
+    end_x, end_y = loop.edge_path[-1]
+    assert end_x == pytest.approx(decision.x + decision.width / 2, abs=1)
+    assert end_y < decision.y - 1

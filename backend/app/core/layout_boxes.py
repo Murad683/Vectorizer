@@ -982,6 +982,105 @@ def _conflicts(path: list[Point], others: list[list[Point]]) -> int:
     return count
 
 
+def _on_segment(p: Point, a: Point, b: Point, interior: bool) -> bool:
+    """True if ``p`` lies on the axis-aligned segment a-b (strictly between
+    its ends when ``interior``)."""
+    tol = 0.6
+    if abs(a[0] - b[0]) < 0.01:  # vertical
+        lo, hi = min(a[1], b[1]), max(a[1], b[1])
+        inside = (
+            lo + tol < p[1] < hi - tol if interior else lo - tol <= p[1] <= hi + tol
+        )
+        return abs(p[0] - a[0]) < tol and inside
+    lo, hi = min(a[0], b[0]), max(a[0], b[0])
+    inside = lo + tol < p[0] < hi - tol if interior else lo - tol <= p[0] <= hi + tol
+    return abs(p[1] - a[1]) < tol and inside
+
+
+def _covered(a: Point, b: Point, path: list[Point]) -> bool:
+    """True if the whole segment a-b runs along ``path``."""
+    n = max(2, int((abs(a[0] - b[0]) + abs(a[1] - b[1])) / 4))
+    for k in range(n + 1):
+        t = k / n
+        p = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        if not any(
+            _on_segment(p, c, d, interior=False)
+            for c, d in zip(path, path[1:], strict=False)
+        ):
+            return False
+    return True
+
+
+def _passes_straight(p: Point, path: list[Point]) -> tuple[float, float] | None:
+    """Direction of ``path`` where it runs straight THROUGH ``p`` (``p`` is
+    inside one of its segments, not at an end or a corner), else None."""
+    for c, d in zip(path, path[1:], strict=False):
+        if _on_segment(p, c, d, interior=True):
+            return (d[0] - c[0], d[1] - c[1])
+    return None
+
+
+def _cut_at_merges(
+    edges: list[DiagramEdge], routed: dict[int, tuple[list[Point], bool]]
+) -> None:
+    """End a merging arrow where it meets the line it merges into.
+
+    Edges into the same symbol may share their last stretch (a loop joining
+    the connector above a decision, two print blocks joining the line into
+    "Son"). Drawn in full, the joining line hides under the other one and
+    its arrowhead disappears into the symbol's arrowhead. Textbooks draw it
+    the other way: the joining line stops at the junction with its OWN
+    arrowhead pointing at the line it meets, and that line carries on to
+    the symbol. An edge is cut at the first point where it arrives from the
+    side onto a line of another edge into the same target that runs
+    straight through that point, and from where on it only retraces that
+    line. Lines that turn a corner together are not a junction.
+    """
+    groups: dict[str, list[int]] = {}
+    for i in routed:
+        if edges[i].source_id != edges[i].target_id:
+            groups.setdefault(edges[i].target_id, []).append(i)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        for i in sorted(members):
+            path, back = routed[i]
+            others = [routed[j][0] for j in members if j != i]
+            # Corners of the other lines that lie on this one are candidate
+            # junctions too (a line can meet ours in the middle of a run).
+            refined: list[Point] = [path[0]]
+            for a, b in zip(path, path[1:], strict=False):
+                extra = [
+                    q
+                    for other in others
+                    for q in other
+                    if _on_segment(q, a, b, interior=True)
+                ]
+                extra.sort(key=lambda q: abs(q[0] - a[0]) + abs(q[1] - a[1]))
+                refined += extra + [b]
+            for k in range(1, len(refined) - 1):
+                junction = refined[k]
+                come = (
+                    junction[0] - refined[k - 1][0],
+                    junction[1] - refined[k - 1][1],
+                )
+                if abs(come[0]) + abs(come[1]) < 0.01:
+                    continue
+                for other in others:
+                    through = _passes_straight(junction, other)
+                    if through is None:
+                        continue
+                    if abs(come[0] * through[1] - come[1] * through[0]) < 0.01:
+                        continue  # same direction: running along it, not joining
+                    tail = list(zip(refined[k:], refined[k + 1 :], strict=False))
+                    if all(_covered(a, b, other) for a, b in tail):
+                        routed[i] = (_simplify(refined[: k + 1]), back)
+                        break
+                else:
+                    continue
+                break
+
+
 def _simplify(path: list[Point]) -> list[Point]:
     """Drop duplicate and collinear interior points."""
     dedup = [path[0]]
@@ -1168,6 +1267,7 @@ def layout_from_boxes(graph: DiagramGraph) -> LayoutedGraph | None:
         routed[i] = (path, back)
         ports[i] = (s_side, t_side)
     _rip_up_conflicts(router, valid, routed, ports)
+    _cut_at_merges(valid, routed)
 
     labels = _place_labels(
         [

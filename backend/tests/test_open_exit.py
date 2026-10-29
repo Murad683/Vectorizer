@@ -10,6 +10,7 @@ import io
 import zipfile
 
 import docx
+import pytest
 from lxml import etree
 from pptx import Presentation
 from pptx.util import Inches
@@ -69,11 +70,13 @@ def test_exit_keeps_exact_mode_and_lands_on_the_drawn_arrow_tip() -> None:
     assert quality_issues(lg) == []
     end = lg.node_by_id("n7")
     assert end.width == 0 and end.height == 0
-    into = [e for e in lg.edges if e.target_id == "n7"]
-    assert len(into) == 2
-    for e in into:
-        assert e.edge_path is not None
-        assert e.edge_path[-1] == [end.x, end.y]
+    into = {e.source_id: e for e in lg.edges if e.target_id == "n7"}
+    assert set(into) == {"n3", "n6"}
+    trunk, joiner = into["n3"].edge_path, into["n6"].edge_path
+    assert trunk is not None and joiner is not None
+    assert trunk[-1] == [end.x, end.y]
+    # P*3 ends with its own arrowhead ON the open line, like the source.
+    assert joiner[-1][0] == pytest.approx(end.x, abs=0.5) and joiner[-1][1] < end.y - 1
     # Like the source: the open line runs down the right of every symbol.
     rightmost = max(n.x + n.width for n in lg.nodes if n.id != "n7")
     assert end.x > rightmost

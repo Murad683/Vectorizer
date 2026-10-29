@@ -3312,5 +3312,15 @@ calls): both fixed, but the model filled the empty block 3 again
 empty symbols (`DetectedShape.empty`, no ink in the central 40 %) and
 drops any text the model puts there; the example was changed. Frameless
 box measuring tolerates ~25 % vertical drift of the model box (seen: 12 px
-on a 25 px formula). Total live calls in Phase 26: 6. The sum caption keeps the source's literal "1 =" (the
+on a 25 px formula). Total live calls in Phase 26: 6.
+
+**Merging arrows** (`layout_boxes._cut_at_merges`): every sample draws a
+loop or second branch that joins the line into a symbol with its OWN
+arrowhead at the junction, pointing at that line. Routed in full, such an
+edge hid under the other one and its arrowhead vanished. After routing, an
+edge into the same target is cut where it arrives from the side onto a line
+that runs straight through that point (corners turned together are not a
+junction); renderers then draw it as a freeform line ending in an
+arrowhead on the junction. Affects: B loop and `P*3` → open exit, D loop,
+A `6/8 → Son`, `flowchart_a3` loop. The sum caption keeps the source's literal "1 =" (the
 textbook's S is missing in the image; the model no longer invents it).

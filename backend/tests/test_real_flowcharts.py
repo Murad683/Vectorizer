@@ -72,7 +72,9 @@ def test_quadratic_routes_like_the_source() -> None:
         assert e.edge_path is not None
         assert min(p[0] for p in e.edge_path) < son.x  # runs down the left
         end = e.edge_path[-1]
-        assert end[1] == pytest.approx(son.y) or end[0] == pytest.approx(son.x)
+        # ...and stops with its own arrowhead on the line into "Son".
+        assert end[0] == pytest.approx(son.x + son.width / 2, abs=0.5)
+        assert end[1] < son.y - 1
     outer = next(e for e in lg.edges if e.source_id == "n4" and e.target_id == "n9")
     inner = next(e for e in lg.edges if e.source_id == "n5" and e.target_id == "n7")
     assert outer.edge_path is not None and inner.edge_path is not None
@@ -88,5 +90,7 @@ def test_loop_lands_on_the_connector_into_the_decision() -> None:
     loop = next(e for e in lg.edges if e.source_id == "n5" and e.target_id == "n2")
     target = lg.node_by_id("n2")
     assert loop.edge_path is not None
-    assert loop.edge_path[-1][1] == pytest.approx(target.y)
+    end_x, end_y = loop.edge_path[-1]
+    assert end_x == pytest.approx(target.x + target.width / 2, abs=0.5)
+    assert end_y < target.y - 1  # its arrowhead sits on the connector
     assert min(p[0] for p in loop.edge_path) < target.x

@@ -41,6 +41,7 @@ _MIN_SHAPE_AREA = 0.0008
 _MAX_SHAPE_AREA = 0.25
 _LINE_MIN_LEN = 0.045  # fraction of the longer side; shorter = likely text strokes
 _OUTLINE_PAD = 2  # work px added around an interior box to cover its outline
+_GAP_CLOSE = 7  # closing kernel (work px) that seals small breaks in outlines
 
 
 @dataclass
@@ -126,6 +127,60 @@ def _find_shapes(ink: _Image) -> list[tuple[int, int, int, int, float]]:
     return keep
 
 
+def _overlaps(
+    a: tuple[int, int, int, int, float], b: tuple[int, int, int, int, float]
+) -> bool:
+    ix = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    return ix * iy > 0.2 * min(a[2] * a[3], b[2] * b[3])
+
+
+def _reach(ink: _Image, x: int, y: int, dx: int, dy: int, limit: int) -> int:
+    """How many white pixels lie from (x, y) towards (dx, dy) before ink."""
+    h_img, w_img = ink.shape
+    steps = 0
+    while steps < limit:
+        nx, ny = x + dx * (steps + 1), y + dy * (steps + 1)
+        if not (0 <= nx < w_img and 0 <= ny < h_img) or ink[ny, nx]:
+            break
+        steps += 1
+    return steps
+
+
+def _find_gapped_shapes(
+    ink: _Image, found: list[tuple[int, int, int, int, float]]
+) -> list[tuple[int, int, int, int, float]]:
+    """Symbols whose outline has a small break (a faint or JPEG-broken
+    corner, typically a diamond tip where a connector leaves), so their
+    interior leaks into the page background and ``_find_shapes`` misses
+    them. A stronger closing seals the break; closing also fills the narrow
+    tips, so each recovered box is re-measured on the original ink along
+    its centre lines (capped, so a scan through the break cannot run off).
+    """
+    k = _GAP_CLOSE
+    closed = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
+    extra: list[tuple[int, int, int, int, float]] = []
+    for cand in _find_shapes(closed):
+        if any(_overlaps(cand, s) for s in found):
+            continue
+        x, y, w, h, fill = cand
+        cx, cy = x + w // 2, y + h // 2
+        limit = 4 * k
+        left = _reach(ink, x, cy, -1, 0, limit)
+        right = _reach(ink, x + w - 1, cy, 1, 0, limit)
+        top = _reach(ink, cx, y, 0, -1, limit)
+        bottom = _reach(ink, cx, y + h - 1, 0, 1, limit)
+        # Flowchart symbols are mirror-symmetric, and a connector glued to
+        # a tip can hide part of it: trust the longer reach on each axis.
+        left = right = max(left, right)
+        top = bottom = max(top, bottom)
+        nw, nh = w + left + right, h + top + bottom
+        # The interior area grew with the box; keep the fill ratio honest.
+        extra.append((x - left, y - top, nw, nh, fill * w * h / float(nw * nh)))
+        logger.info("Recovered a symbol with a broken outline at %s", (x, y, w, h))
+    return extra
+
+
 def _find_segments(
     ink: _Image, shapes: list[tuple[int, int, int, int, float]]
 ) -> list[tuple[float, float, float, float]]:
@@ -179,6 +234,9 @@ def detect(image: bytes) -> Detection | None:
     work = cv2.resize(img, None, fx=factor, fy=factor, interpolation=interp)
     ink = _binarise(work)
     shapes = _find_shapes(ink)
+    shapes = sorted(
+        shapes + _find_gapped_shapes(ink, shapes), key=lambda s: (s[1], s[0])
+    )
     segments = _find_segments(ink, shapes)
 
     def back(v: float) -> float:

@@ -27,6 +27,8 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from app.models.diagram import ShapeType
+
 if TYPE_CHECKING:
     from app.models.diagram import DiagramGraph
 
@@ -53,6 +55,9 @@ class DetectedShape:
     x1: float
     y1: float
     fill: float  # interior area / bbox area: ~1 rect, ~0.8 parallelogram, ~0.5 diamond
+    # Geometric hint where the outline is unambiguous: "document" (flat top,
+    # vertical sides, wavy bottom); "" = no opinion (the model decides).
+    kind: str = ""
 
 
 @dataclass
@@ -85,11 +90,40 @@ def _binarise(gray: _Image) -> _Image:
     return cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
 
-def _find_shapes(ink: _Image) -> list[tuple[int, int, int, int, float]]:
-    """Interior regions enclosed by ink: (x, y, w, h, fill) in work px."""
+# (x, y, w, h, fill, kind) in work px.
+_Shape = tuple[int, int, int, int, float, str]
+
+
+def _outline_kind(solid: _Image) -> str:
+    """Classify a filled symbol mask: "document" or "" (undecided).
+
+    A document symbol has a flat top, vertical sides and a wave along the
+    bottom whose left part sits clearly lower than its right part. Medians
+    over wide column bands ignore local notches (an arrowhead touching the
+    outline), which a plain min/max would not.
+    """
+    h, w = solid.shape
+    if h < 8 or w < 8:
+        return ""
+    present = solid > 0
+    cols = np.arange(int(0.08 * w), int(0.92 * w))
+    rows = np.arange(int(0.1 * h), int(0.6 * h))
+    top = np.argmax(present[:, cols], axis=0)
+    bottom = h - 1 - np.argmax(present[::-1, :], axis=0)
+    left = np.argmax(present[rows, :], axis=1)
+    right = w - 1 - np.argmax(present[rows, ::-1], axis=1)
+    if np.ptp(top) > 0.04 * h or np.ptp(left) > 0.04 * w or np.ptp(right) > 0.04 * w:
+        return ""
+    low = float(np.median(bottom[int(0.1 * w) : int(0.35 * w)]))
+    high = float(np.median(bottom[int(0.7 * w) : int(0.92 * w)]))
+    return "document" if abs(low - high) >= 0.08 * h else ""
+
+
+def _find_shapes(ink: _Image) -> list[_Shape]:
+    """Interior regions enclosed by ink: (x, y, w, h, fill, kind) in work px."""
     h_img, w_img = ink.shape
     n, lab, stats, _ = cv2.connectedComponentsWithStats(255 - ink, connectivity=4)
-    found: list[tuple[int, int, int, int, float]] = []
+    found: list[_Shape] = []
     for i in range(1, n):
         x, y, w, h, area = (int(v) for v in stats[i])
         if x == 0 or y == 0 or x + w >= w_img or y + h >= h_img:
@@ -109,7 +143,13 @@ def _find_shapes(ink: _Image) -> list[tuple[int, int, int, int, float]]:
         hull_area = cv2.contourArea(cv2.convexHull(contour))
         if hull_area <= 0 or c_area / hull_area < 0.85:
             continue  # flowchart symbols are convex; loop enclosures are not
-        found.append((x, y, w, h, c_area / float(w * h)))
+        fill = c_area / float(w * h)
+        kind = ""
+        if fill > 0.82:
+            solid = np.zeros_like(mask)
+            cv2.drawContours(solid, [contour], -1, 255, -1)
+            kind = _outline_kind(solid)
+        found.append((x, y, w, h, fill, kind))
     # Drop regions nested inside another region (e.g. a symbol drawn in a frame).
     keep = []
     for a in found:
@@ -127,9 +167,7 @@ def _find_shapes(ink: _Image) -> list[tuple[int, int, int, int, float]]:
     return keep
 
 
-def _overlaps(
-    a: tuple[int, int, int, int, float], b: tuple[int, int, int, int, float]
-) -> bool:
+def _overlaps(a: _Shape, b: _Shape) -> bool:
     ix = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
     iy = max(0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
     return ix * iy > 0.2 * min(a[2] * a[3], b[2] * b[3])
@@ -147,9 +185,7 @@ def _reach(ink: _Image, x: int, y: int, dx: int, dy: int, limit: int) -> int:
     return steps
 
 
-def _find_gapped_shapes(
-    ink: _Image, found: list[tuple[int, int, int, int, float]]
-) -> list[tuple[int, int, int, int, float]]:
+def _find_gapped_shapes(ink: _Image, found: list[_Shape]) -> list[_Shape]:
     """Symbols whose outline has a small break (a faint or JPEG-broken
     corner, typically a diamond tip where a connector leaves), so their
     interior leaks into the page background and ``_find_shapes`` misses
@@ -159,11 +195,11 @@ def _find_gapped_shapes(
     """
     k = _GAP_CLOSE
     closed = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
-    extra: list[tuple[int, int, int, int, float]] = []
+    extra: list[_Shape] = []
     for cand in _find_shapes(closed):
         if any(_overlaps(cand, s) for s in found):
             continue
-        x, y, w, h, fill = cand
+        x, y, w, h, fill, kind = cand
         cx, cy = x + w // 2, y + h // 2
         limit = 4 * k
         left = _reach(ink, x, cy, -1, 0, limit)
@@ -176,13 +212,14 @@ def _find_gapped_shapes(
         top = bottom = max(top, bottom)
         nw, nh = w + left + right, h + top + bottom
         # The interior area grew with the box; keep the fill ratio honest.
-        extra.append((x - left, y - top, nw, nh, fill * w * h / float(nw * nh)))
+        fill = fill * w * h / float(nw * nh)
+        extra.append((x - left, y - top, nw, nh, fill, kind))
         logger.info("Recovered a symbol with a broken outline at %s", (x, y, w, h))
     return extra
 
 
 def _find_segments(
-    ink: _Image, shapes: list[tuple[int, int, int, int, float]]
+    ink: _Image, shapes: list[_Shape]
 ) -> list[tuple[float, float, float, float]]:
     """Straight connector segments in work px, from ink touching a symbol."""
     if not shapes:
@@ -194,7 +231,7 @@ def _find_segments(
     bridged = cv2.dilate(ink, np.ones((7, 7), np.uint8))
     n, lab = cv2.connectedComponents(bridged, connectivity=8)
     touching: set[int] = set()
-    for x, y, w, h, _ in shapes:
+    for x, y, w, h, _, _ in shapes:
         x0, y0 = max(x - 3, 0), max(y - 3, 0)
         x1, y1 = min(x + w + 3, w_img), min(y + h + 3, h_img)
         ring = lab[y0:y1, x0:x1].copy()
@@ -202,7 +239,7 @@ def _find_segments(
         touching.update(int(v) for v in np.unique(ring) if v)
     diagram = (np.isin(lab, list(touching)) & (ink > 0)).astype(np.uint8) * 255
     # Remove the symbols themselves (outline + interior text).
-    for x, y, w, h, _ in shapes:
+    for x, y, w, h, _, _ in shapes:
         pad = 9
         diagram[max(y - pad, 0) : y + h + pad, max(x - pad, 0) : x + w + pad] = 0
     length = max(8, int(_LINE_MIN_LEN * max(h_img, w_img)))
@@ -243,7 +280,7 @@ def detect(image: bytes) -> Detection | None:
         return v / factor
 
     detection = Detection(width=orig_w, height=orig_h)
-    for x, y, w, h, fill in shapes:
+    for x, y, w, h, fill, kind in shapes:
         detection.shapes.append(
             DetectedShape(
                 back(max(x - _OUTLINE_PAD, 0)),
@@ -251,6 +288,7 @@ def detect(image: bytes) -> Detection | None:
                 back(x + w + _OUTLINE_PAD),
                 back(y + h + _OUTLINE_PAD),
                 fill,
+                kind,
             )
         )
     detection.segments = [
@@ -317,6 +355,14 @@ def apply_detection(graph: "DiagramGraph", detection: Detection) -> None:
             continue
         used.add(mark)
         s = detection.shapes[mark - 1]
+        if s.kind == "document" and node.shape_type in (
+            ShapeType.PROCESS,
+            ShapeType.INPUT_OUTPUT,
+        ):
+            # The wavy bottom is measured, not guessed; models often call a
+            # print block a parallelogram ("output") or a rectangle.
+            logger.info("Node %s: outline is a document symbol", node.id)
+            node.shape_type = ShapeType.DOCUMENT
         node.box_2d = [
             round(s.y0 / h * 1000),
             round(s.x0 / w * 1000),

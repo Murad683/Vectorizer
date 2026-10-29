@@ -18,6 +18,7 @@ from pptx.shapes.connector import Connector
 from pptx.slide import Slide
 from pptx.util import Emu, Pt
 
+from app.core.shape_geometry import DOCUMENT_TEXT_BOTTOM
 from app.models.diagram import DiagramEdge, LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ SHAPE_TYPE_TO_MSO: dict[ShapeType, MSO_SHAPE] = {
     ShapeType.PROCESS: MSO_SHAPE.RECTANGLE,
     ShapeType.DECISION: MSO_SHAPE.DIAMOND,
     ShapeType.INPUT_OUTPUT: MSO_SHAPE.PARALLELOGRAM,
+    ShapeType.DOCUMENT: MSO_SHAPE.FLOWCHART_DOCUMENT,
 }
 
 # Layout px are treated as CSS px: 1 px = 9525 EMU (96 dpi).
@@ -93,11 +95,19 @@ def _px_to_emu(px: float, scale: float) -> Emu:
 
 
 def _font_size_for(node: LayoutedNode, scale: float) -> Pt:
-    """Pick a font size that fits the node's text into its (scaled) width."""
+    """Pick a font size that fits the node's text into its (scaled) box."""
     size = int(_FONT_SIZE.pt * scale)
     approx_char_px = 0.66
+    lines = node.text.split("\n")
+    longest = max(len(line) for line in lines)
+    # Text height in px: lines x line pitch (1.2 em; 1 pt = 4/3 px).
+    usable_h = node.height * scale * 0.85
+    if node.shape_type == ShapeType.DOCUMENT:
+        usable_h *= DOCUMENT_TEXT_BOTTOM  # the wave is not part of the text area
     while size > int(_MIN_FONT_SIZE.pt):
-        if len(node.text) * size * approx_char_px <= node.width * scale:
+        fits_w = longest * size * approx_char_px <= node.width * scale
+        fits_h = len(lines) * size * 1.2 * 4 / 3 <= usable_h
+        if fits_w and fits_h:
             break
         size -= 1
     return Pt(max(size, int(_MIN_FONT_SIZE.pt)))
@@ -606,11 +616,15 @@ def add_diagram_to_slide(
     offset_y_emu: int = 0,
     max_width_emu: int | None = None,
     max_height_emu: int | None = None,
-) -> None:
-    """Draw the layouted graph onto ``slide`` as native editable shapes."""
+) -> int:
+    """Draw the layouted graph onto ``slide`` as native editable shapes.
+
+    Returns the drawn height in EMU (0 for an empty graph), so callers can
+    place content (e.g. a caption) directly below the diagram.
+    """
     if not graph.nodes:
         logger.warning("Empty graph; nothing added to slide")
-        return
+        return 0
 
     scale = 1.0
     if max_width_emu is not None:
@@ -639,12 +653,16 @@ def add_diagram_to_slide(
         text_frame = shape.text_frame
         text_frame.word_wrap = True
         text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
-        paragraph = text_frame.paragraphs[0]
-        paragraph.alignment = PP_ALIGN.CENTER
-        run = paragraph.add_run()
-        run.text = node.text
-        run.font.size = _font_size_for(node, scale)
-        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        font_size = _font_size_for(node, scale)
+        for i, line in enumerate(node.text.split("\n")):
+            paragraph = (
+                text_frame.paragraphs[0] if i == 0 else text_frame.add_paragraph()
+            )
+            paragraph.alignment = PP_ALIGN.CENTER
+            run = paragraph.add_run()
+            run.text = line
+            run.font.size = font_size
+            run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
         shapes_by_id[node.id] = shape
 
     # Precompute every node's and label's layout-px box once, so a
@@ -742,3 +760,4 @@ def add_diagram_to_slide(
         len(shapes_by_id),
         len(graph.edges),
     )
+    return int(graph.canvas_height * scale * _EMU_PER_PX)

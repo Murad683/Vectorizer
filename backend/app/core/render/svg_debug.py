@@ -8,6 +8,7 @@ natively editable shapes (PPTX now, DOCX in Phase 4).
 import html
 import logging
 
+from app.core.shape_geometry import document_outline
 from app.models.diagram import DiagramEdge, LayoutedGraph, LayoutedNode, ShapeType
 
 logger = logging.getLogger(__name__)
@@ -35,17 +36,24 @@ def _shape_svg(node: LayoutedNode) -> str:
         skew = h * 0.35
         points = f"{x + skew},{y} {x + w},{y} " f"{x + w - skew},{y + h} {x},{y + h}"
         return f'<polygon points="{points}" {style}/>'
+    if node.shape_type == ShapeType.DOCUMENT:
+        points = " ".join(f"{x + fx * w},{y + fy * h}" for fx, fy in document_outline())
+        return f'<polygon points="{points}" {style}/>'
     return f'<rect x="{x}" y="{y}" width="{w}" height="{h}" {style}/>'
 
 
 def _text_svg(node: LayoutedNode) -> str:
     """Return the centred label for a node."""
     cx = node.x + node.width / 2
-    cy = node.y + node.height / 2
+    lines = node.text.split("\n")
+    top = node.y + node.height / 2 - (len(lines) - 1) * _FONT_SIZE * 0.6
+    spans = "".join(
+        f'<tspan x="{cx}" y="{top + i * _FONT_SIZE * 1.2}">{html.escape(line)}</tspan>'
+        for i, line in enumerate(lines)
+    )
     return (
-        f'<text x="{cx}" y="{cy}" text-anchor="middle" '
-        f'dominant-baseline="central" font-size="{_FONT_SIZE}" '
-        f'font-family="sans-serif">{html.escape(node.text)}</text>'
+        f'<text text-anchor="middle" dominant-baseline="central" '
+        f'font-size="{_FONT_SIZE}" font-family="sans-serif">{spans}</text>'
     )
 
 

@@ -28,6 +28,7 @@ import logging
 import statistics
 from dataclasses import dataclass
 
+from app.core.shape_geometry import DOCUMENT_TEXT_BOTTOM, document_bottom
 from app.models.diagram import (
     DiagramEdge,
     DiagramGraph,
@@ -104,6 +105,7 @@ _SHAPE_MIN = {
     "terminator": (120.0, 44.0),
     "process": (120.0, 44.0),
     "input_output": (130.0, 44.0),
+    "document": (130.0, 44.0),
     "decision": (150.0, 80.0),
 }
 
@@ -111,10 +113,15 @@ _SHAPE_MIN = {
 def _min_size(text: str, shape: str) -> tuple[float, float]:
     """Smallest comfortable size for the node's text at 12 pt."""
     base_w, base_h = _SHAPE_MIN[shape]
-    needed = len(text) * 8.0 + 30.0
+    lines = text.split("\n")
+    needed = max(len(line) for line in lines) * 8.0 + 30.0
+    height = base_h + (len(lines) - 1) * 16.0
     if shape == "decision":
         needed *= 1.6  # text must fit inside the diamond's inner area
-    return max(base_w, needed), base_h
+        height += (len(lines) - 1) * 16.0
+    elif shape == "document":
+        height /= DOCUMENT_TEXT_BOTTOM  # text sits above the wave
+    return max(base_w, needed), height
 
 
 def _cluster(values: list[float], tol: float) -> list[float]:
@@ -289,9 +296,11 @@ class _Router:
         boxes: dict[str, _Box],
         guides: list[Segment],
         diamonds: set[str] | None = None,
+        documents: set[str] | None = None,
     ) -> None:
         self.boxes = boxes
         self.diamonds = diamonds or set()
+        self.documents = documents or set()
         self.obstacles = {
             nid: (
                 b.x - _INFLATE,
@@ -349,13 +358,16 @@ class _Router:
     # -- ports --------------------------------------------------------------
     def _outline_point(self, nid: str, side: PortSide, along: float) -> Point:
         """Border point on ``side`` at coordinate ``along`` (x for top/bottom,
-        y for left/right); follows the slanted outline of a diamond."""
+        y for left/right); follows the slanted outline of a diamond and the
+        wavy bottom of a document symbol."""
         b = self.boxes[nid]
         if side in (PortSide.TOP, PortSide.BOTTOM):
             x = min(max(along, b.x), b.x + b.w)
             if nid in self.diamonds:
                 dy = (b.h / 2) * (1 - min(abs(x - b.cx) / (b.w / 2), 1.0))
                 y = b.cy - dy if side == PortSide.TOP else b.cy + dy
+            elif nid in self.documents and side == PortSide.BOTTOM:
+                y = b.y + b.h * document_bottom((x - b.x) / b.w)
             else:
                 y = b.y if side == PortSide.TOP else b.y + b.h
             return (x, y)
@@ -390,7 +402,9 @@ class _Router:
                 mid = b.cx if side in (PortSide.TOP, PortSide.BOTTOM) else b.cy
                 side_hits = [a for s, a in hits if s == side]
                 centre_hit = any(abs(a - mid) <= 6 for a in side_hits)
-                plist.append(_Port(nid, side, b.port(side), centre_hit))
+                plist.append(
+                    _Port(nid, side, self._outline_point(nid, side, mid), centre_hit)
+                )
                 taken = [mid]
                 for a in sorted(side_hits):
                     if all(abs(a - t) > 6 for t in taken):
@@ -781,7 +795,8 @@ def layout_from_boxes(graph: DiagramGraph) -> LayoutedGraph | None:
     boxes, guides = placed
 
     diamonds = {n.id for n in graph.nodes if n.shape_type.value == "decision"}
-    router = _Router(boxes, guides, diamonds)
+    documents = {n.id for n in graph.nodes if n.shape_type.value == "document"}
+    router = _Router(boxes, guides, diamonds, documents)
 
     def is_back(e: DiagramEdge) -> bool:
         s, t = boxes[e.source_id], boxes[e.target_id]

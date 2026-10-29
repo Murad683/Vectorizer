@@ -11,8 +11,10 @@ whatever the current detector finds. Used by the tests and by
 from collections.abc import Callable
 from pathlib import Path
 
-from app.core.diagram_detect import Detection
-from app.models.diagram import DiagramEdge, DiagramGraph, DiagramNode
+from app.core.diagram_detect import Detection, detect
+from app.core.layout import layout_graph
+from app.core.vision.postprocess import attach_geometry
+from app.models.diagram import DiagramEdge, DiagramGraph, DiagramNode, LayoutedGraph
 from app.models.diagram import PortSide as P
 from app.models.diagram import ShapeType as T
 
@@ -74,14 +76,14 @@ def quadratic_equation() -> DiagramGraph:
             ("n5", T.DECISION, "D = 0", (107, 215, 302, 262)),
             (
                 "n6",
-                T.INPUT_OUTPUT,
+                T.DOCUMENT,
                 'Çap etməli: "Tənliyin həlli yoxdur"',
                 (120, 274, 301, 311),
             ),
             ("n7", T.PROCESS, "x = -b / 2a", (130, 320, 292, 345)),
             (
                 "n8",
-                T.INPUT_OUTPUT,
+                T.DOCUMENT,
                 "x-in qiymətlərinin çap edilməsi",
                 (120, 365, 301, 402),
             ),
@@ -93,7 +95,7 @@ def quadratic_equation() -> DiagramGraph:
             ),
             (
                 "n10",
-                T.INPUT_OUTPUT,
+                T.DOCUMENT,
                 "x1 və x2-nin qiymətlərinin\nçap edilməsi",
                 (120, 478, 301, 528),
             ),
@@ -177,7 +179,7 @@ def sum_loop() -> DiagramGraph:
             ("n7", T.DECISION, "I > 20", (108, 289, 249, 332)),
             (
                 "n8",
-                T.INPUT_OUTPUT,
+                T.DOCUMENT,
                 "S-in qiymətinin çap edilməsi",
                 (104, 353, 275, 385),
             ),
@@ -194,6 +196,11 @@ def sum_loop() -> DiagramGraph:
             _e("n7", "n8", "hə", P.BOTTOM),
             _e("n8", "n9"),
         ],
+        title=(
+            "Sxem 3. S = x1 + x2 + ... + x20 cəminin hesablanması "
+            "alqoritminin blok-sxemi."
+        ),
+        title_below=True,
     )
 
 
@@ -224,3 +231,15 @@ def simulate_marks(graph: DiagramGraph, detection: Detection) -> None:
                 node.mark = i
                 used.add(i)
                 break
+
+
+def run_fixture(name: str) -> tuple[DiagramGraph, LayoutedGraph]:
+    """Detection + simulated marks + layout for one fixture, offline."""
+    file, make = FIXTURES[name]
+    image = (SAMPLES / file).read_bytes()
+    detection = detect(image)
+    assert detection is not None
+    graph = make()
+    simulate_marks(graph, detection)
+    attach_geometry(graph, image, detection, marked=True)
+    return graph, layout_graph(graph.model_copy(deep=True))

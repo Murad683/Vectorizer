@@ -53,6 +53,7 @@ SHAPE_TYPE_TO_PRST: dict[ShapeType, str] = {
     ShapeType.PROCESS: "rect",
     ShapeType.DECISION: "diamond",
     ShapeType.INPUT_OUTPUT: "parallelogram",
+    ShapeType.DOCUMENT: "flowChartDocument",
 }
 
 _EMU_PER_PX = 9525
@@ -74,6 +75,14 @@ def _shape_wsp(
 ) -> str:
     """A wps:wsp autoshape with a real, editable centred text box."""
     sz_half_pt = font_pt * 2
+    paragraphs = "".join(
+        "<w:p>"
+        '<w:pPr><w:spacing w:after="0"/><w:jc w:val="center"/></w:pPr>'
+        f'<w:r><w:rPr><w:sz w:val="{sz_half_pt}"/><w:szCs w:val="{sz_half_pt}"/>'
+        f'</w:rPr><w:t xml:space="preserve">{escape(line)}</w:t></w:r>'
+        "</w:p>"
+        for line in node.text.split("\n")
+    )
     if node.shape_type == ShapeType.INPUT_OUTPUT:
         geometry = parallelogram_geometry_xml(cx, cy)
     else:
@@ -90,11 +99,7 @@ def _shape_wsp(
         f'<a:ln w="{_LINE_WIDTH_EMU}">'
         '<a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
         "</wps:spPr>"
-        "<wps:txbx><w:txbxContent><w:p>"
-        '<w:pPr><w:spacing w:after="0"/><w:jc w:val="center"/></w:pPr>'
-        f'<w:r><w:rPr><w:sz w:val="{sz_half_pt}"/><w:szCs w:val="{sz_half_pt}"/>'
-        f'</w:rPr><w:t xml:space="preserve">{escape(node.text)}</w:t></w:r>'
-        "</w:p></w:txbxContent></wps:txbx>"
+        f"<wps:txbx><w:txbxContent>{paragraphs}</w:txbxContent></wps:txbx>"
         '<wps:bodyPr rot="0" vert="horz" lIns="18000" tIns="18000" '
         'rIns="18000" bIns="18000" anchor="ctr" anchorCtr="0">'
         "<a:noAutofit/></wps:bodyPr>"

@@ -118,7 +118,7 @@ def _add_vision_element(
 
     graph = result.diagram_graph
     if graph is not None and graph.edges:
-        if graph.title:
+        if graph.title and not graph.title_below:
             document.add_paragraph().add_run(graph.title)
         layouted = layout_graph(graph)
         add_diagram_to_docx(
@@ -129,6 +129,8 @@ def _add_vision_element(
             relative_from="paragraph",
         )
         _flow_text_around(document)
+        if graph.title and graph.title_below:
+            document.add_paragraph().add_run(graph.title)
         return
 
     logger.warning(

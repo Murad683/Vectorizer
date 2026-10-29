@@ -36,6 +36,7 @@ _SHAPE_MAP: dict[ShapeType, str] = {
     ShapeType.PROCESS: "rectangle",
     ShapeType.DECISION: "diamond",
     ShapeType.INPUT_OUTPUT: "parallelogram",
+    ShapeType.DOCUMENT: "rectangle",
 }
 
 # Graphviz uses 72 points per inch; layout px are 96 dpi (1 px = 9525 EMU).
@@ -55,12 +56,15 @@ def _node_size_inches(node: DiagramNode) -> tuple[float, float]:
     defaults: dict[ShapeType, tuple[float, float]] = {
         ShapeType.PROCESS: (160.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
         ShapeType.INPUT_OUTPUT: (160.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
+        ShapeType.DOCUMENT: (160.0 / _LAYOUT_DPI, 56.0 / _LAYOUT_DPI),
         ShapeType.DECISION: (180.0 / _LAYOUT_DPI, 90.0 / _LAYOUT_DPI),
         ShapeType.TERMINATOR: (140.0 / _LAYOUT_DPI, 50.0 / _LAYOUT_DPI),
     }
     w_default, h_default = defaults[node.shape_type]
-    w_needed = len(node.text) * char_width + text_pad
-    return max(w_default, w_needed), h_default
+    lines = node.text.split("\n")
+    w_needed = max(len(line) for line in lines) * char_width + text_pad
+    h_needed = h_default + (len(lines) - 1) * 16.0 / _LAYOUT_DPI
+    return max(w_default, w_needed), h_needed
 
 
 def _parse_edge_pos(pos_str: str) -> tuple[list[list[float]], list[float] | None]:

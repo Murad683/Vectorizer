@@ -10,6 +10,7 @@ import math
 
 from PIL import Image, ImageDraw, ImageFont
 
+from app.core.shape_geometry import document_outline
 from app.models.diagram import LayoutedGraph, LayoutedNode, ShapeType
 
 _FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -30,12 +31,8 @@ def _outline(node: LayoutedNode) -> list[tuple[float, float]]:
     if node.shape_type == ShapeType.INPUT_OUTPUT:
         s = h * 0.3
         return [(x + s, y), (x + w, y), (x + w - s, y + h), (x, y + h)]
-    if node.shape_type.value == "document":
-        pts = [(x, y), (x + w, y), (x + w, y + h * 0.85)]
-        for i in range(21):
-            t = 1 - i / 20
-            pts.append((x + w * t, y + h * 0.85 + math.sin(t * 2 * math.pi) * h * 0.1))
-        return pts
+    if node.shape_type == ShapeType.DOCUMENT:
+        return [(x + fx * w, y + fy * h) for fx, fy in document_outline()]
     return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
 
 

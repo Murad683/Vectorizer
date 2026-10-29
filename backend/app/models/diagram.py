@@ -17,7 +17,8 @@ class ShapeType(str, Enum):
     TERMINATOR = "terminator"  # oval — Başlanğıc / Son
     PROCESS = "process"  # rectangle — assignments, actions
     DECISION = "decision"  # diamond — conditions
-    INPUT_OUTPUT = "input_output"  # parallelogram — input / print
+    INPUT_OUTPUT = "input_output"  # parallelogram — input / read
+    DOCUMENT = "document"  # rectangle with a wavy bottom — print / output ("Çap")
 
 
 class PortSide(str, Enum):
@@ -134,11 +135,15 @@ class DiagramGraph(BaseModel):
     title: str | None = Field(
         default=None,
         description=(
-            "A heading/title line positioned above the flowchart itself in "
-            "the source image, if any (e.g. 'Blok-sxem nəyi hesablayır?') — "
-            "distinct from any node's own label. None when the image has no "
-            "such line."
+            "A heading or caption line outside the flowchart's symbols and "
+            "arrows in the source image, if any (e.g. 'Blok-sxem nəyi "
+            "hesablayır?', 'Sxem 3. ... blok-sxemi.') — distinct from any "
+            "node's own label. None when the image has no such line."
         ),
+    )
+    title_below: bool = Field(
+        default=False,
+        description="True when the title/caption is printed BELOW the flowchart.",
     )
 
 

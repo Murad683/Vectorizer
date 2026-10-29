@@ -78,7 +78,7 @@ def topology_problems(graph: DiagramGraph) -> list[str]:
     for n in graph.nodes:
         label = f'"{n.text}" ({n.id})'
         kind = n.shape_type.value
-        if kind in ("process", "input_output") and outs[n.id] != 1:
+        if kind in ("process", "input_output", "document") and outs[n.id] != 1:
             problems.append(
                 f"{label} is a {kind} symbol with {outs[n.id]} outgoing arrows; "
                 "it must have exactly 1 (check loop-back arrows)"

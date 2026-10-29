@@ -57,15 +57,36 @@ Set "content_type" to:
 - "text_content" — textual content with NO flow arrows, e.g. a matching \
 question made of two labeled lists (a numbered list and a lettered list).
 
-If content_type is "diagram", fill "diagram" with {nodes, edges, title}:
+If content_type is "diagram", fill "diagram" with {nodes, edges, title, \
+title_below}:
 - One node per flowchart symbol. shape_type is one of:
-  "terminator" (oval/stadium, e.g. Başlanğıc / Son),
-  "process" (rectangle, e.g. assignments),
+  "terminator" (oval/stadium/rounded box, e.g. Başlanğıc / Son / START),
+  "process" (plain rectangle, e.g. assignments),
   "decision" (diamond, conditions),
-  "input_output" (parallelogram, input or output of a variable).
-- "text" is the label EXACTLY as written, in Azerbaijani. Do not translate.
+  "input_output" (parallelogram: straight, slanted left and right sides; \
+e.g. "... daxil edilməsi", READ),
+  "document" (rectangle whose BOTTOM edge is a wave instead of a straight \
+line; textbooks draw print/output blocks this way, e.g. "... çap \
+edilməsi", "Çap etməli: ..."). Look at the bottom edge: wavy = "document", \
+slanted sides = "input_output", straight = "process".
+- "text" is the label EXACTLY as written, in Azerbaijani. Do not translate, \
+do not compute, do not complete. When the label is on several lines inside \
+the symbol, keep each line and join them with "\\n".
+- A symbol that is EMPTY in the image gets "text": "" (empty string). If \
+some characters are unreadable, write only what is readable. Never invent \
+text that is not printed in the image (e.g. never fill an empty box with \
+the formula you expect there).
+- Old scans often print "ə" as "›" or a similar broken glyph (e.g. \
+"daxil edilm›si" means "daxil edilməsi", "h›" means "hə"); write the \
+intended Azerbaijani letter.
+- Numbers printed in the margin beside the symbols (step/row numbers \
+1, 2, 3, ...) are NOT part of the flowchart: ignore them.
 - One edge per arrow, in the arrow's direction. Branch labels on arrows \
-(e.g. "Hə", "Yox") go in that edge's "label"; null when the arrow has none.
+(e.g. "hə", "yox") go in that edge's "label", written as printed; null \
+when the arrow has none.
+- An arrow that ends ON ANOTHER ARROW'S LINE (not on a symbol) joins that \
+line: its target_id is the symbol that line finally points to. Follow the \
+line to its arrowhead; never connect it to the symbol the line comes from.
 - For edges leaving a DECISION (diamond) node: set "source_port" to the \
 side the arrow exits from in the image — "left", "right", "bottom", or \
 "top". Look at the image carefully. Leave it null for non-decision nodes \
@@ -76,11 +97,13 @@ image height / width). Measure carefully: the output layout reproduces the \
 original arrangement from these boxes.
 - Node ids "n1", "n2", ... in reading order. Include loop-back arrows.
 - A flowchart always has arrows, so "edges" must not be empty.
-- "title" is a heading/question line positioned ABOVE the flowchart itself \
-(e.g. "Blok-sxem nəyi hesablayır?" or "Problem 2: ..."), if the image has \
-one. This is NOT any node's own label — it sits outside the flowchart's \
-boxes/arrows entirely. Preserve it EXACTLY. Leave it null if the image has \
-no such line — never invent a title that isn't actually in the image.
+- "title" is a heading or caption line that belongs to the flowchart but \
+sits OUTSIDE its symbols and arrows — either above it (e.g. "Problem 2: \
+...", "Blok-sxem nəyi hesablayır?") or below it (e.g. "Sxem 3. ... \
+alqoritminin blok-sxemi."). Preserve it EXACTLY, including any formula in \
+it (write subscripts inline, e.g. "S = x1 + x2 + ... + x20"). Set \
+"title_below" to true when that line is BELOW the flowchart, false when it \
+is above. Leave "title" null if there is no such line — never invent one.
 Leave "text_content" null in this case.
 
 If content_type is "text_content", fill "text_content" with {heading, lists}:

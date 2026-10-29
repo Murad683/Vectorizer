@@ -9,6 +9,7 @@ import psycopg
 import pymupdf
 import pytest
 
+from app.config import get_settings
 from app.core.auth.store import RefreshTokenStore, UserStore
 from app.core.queue.store import JobStore
 from app.models.diagram import DiagramEdge, DiagramGraph, DiagramNode, ShapeType
@@ -39,10 +40,26 @@ def _migrated_test_database() -> None:
         )
         if result.returncode != 0:
             import warnings
+
             warnings.warn("Test database not available — DB tests will fail")
     except subprocess.TimeoutExpired:
         import warnings
+
         warnings.warn("Test database not reachable — DB tests will fail")
+
+
+@pytest.fixture(autouse=True)
+def _no_debug_dumps(monkeypatch: pytest.MonkeyPatch) -> object:
+    """Tests never write into the real dump folder.
+
+    The dev container sets DEBUG_DUMP_DIR, so mocked vision calls used to
+    leave fake "a < 5" dumps next to the real ones. Tests that exercise the
+    dump set their own temporary directory.
+    """
+    monkeypatch.setenv("DEBUG_DUMP_DIR", "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _truncate_all() -> None:

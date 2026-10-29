@@ -20,6 +20,7 @@ from app.config import get_settings  # noqa: E402
 from app.core.assembly import assemble_docx, assemble_pptx  # noqa: E402
 from app.core.classifier import classify_elements  # noqa: E402
 from app.core.ingestion import get_extractor  # noqa: E402
+from app.core.vision.cache import CachedVisionProvider  # noqa: E402
 from app.logging_config import configure_logging  # noqa: E402
 
 SAMPLES = Path(__file__).resolve().parents[2] / "samples"
@@ -48,12 +49,13 @@ def main() -> int:
     source = SAMPLES / "informatika_seh_40_41.docx"
     classified = classify_elements(get_extractor(source).extract(source))
 
-    document = assemble_docx(classified)
+    vision = CachedVisionProvider()  # one vision call per image, both outputs
+    document = assemble_docx(classified, vision_provider=vision)
     docx_path = OUTPUT / "full_document.docx"
     document.save(str(docx_path))
     print(f"Saved {docx_path}")
 
-    prs = assemble_pptx(classified)
+    prs = assemble_pptx(classified, vision_provider=vision)
     pptx_path = OUTPUT / "full_document.pptx"
     prs.save(str(pptx_path))
     print(f"Saved {pptx_path}")

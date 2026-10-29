@@ -135,3 +135,35 @@ def test_pptx_formula_has_real_subscripts() -> None:
         if r.font._rPr.get("baseline") == "-25000"
     ]
     assert lowered == ["1", "2"]
+
+
+def test_latex_leaking_into_text_is_rebuilt() -> None:
+    """Real answer for the quadratic diagram: text held LaTeX commands."""
+    import json
+
+    from app.core.vision.postprocess import parse_diagram_graph
+
+    graph = parse_diagram_graph(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "n1",
+                        "shape_type": "process",
+                        "text": r"x_{1} = (-b + \sqrt{D}) / 2a",
+                        "latex": r"x_{1} = \frac{-b+\sqrt{D}}{2a}",
+                    },
+                    {
+                        "id": "n2",
+                        "shape_type": "process",
+                        "text": "a/b",
+                        "latex": r"\frac{a}",
+                    },
+                ],
+                "edges": [],
+            }
+        )
+    )
+    assert graph is not None
+    assert graph.nodes[0].text == "x_{1} = (-b+√D)/(2a)"
+    assert graph.nodes[1].latex is None  # unparseable -> plain text is used

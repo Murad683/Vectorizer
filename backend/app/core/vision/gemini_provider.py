@@ -75,18 +75,22 @@ the symbol, keep each line and join them with "\\n".
 - Subscripts and superscripts in "text" (and in "title") are written as \
 _{...} and ^{...}: "X_{1}, X_{2}, ... X_{20}", "b^{2}". Digits printed on the normal \
 baseline stay plain.
-- When a node's label is a mathematical formula with a fraction, a root \
-or sub/superscripts (e.g. a stacked fraction like −b over 2a), ALSO give \
-it in "latex", using only \\frac, \\sqrt, _, ^, \\text, \\cdot, \\le, \
-\\ge, \\ne, \\ldots: "x = \\frac{-b}{2a}". Keep "text" as a readable \
+- When a node's label is a mathematical formula PRINTED with a stacked \
+fraction (numerator above a bar, denominator below), a root sign, or \
+raised/lowered characters, ALSO give it in "latex". A slash written on \
+one line ("5/9 * (F - 32)") is NOT a stacked fraction: then "latex" is \
+null and "text" keeps the slash. Use only \\frac, \\sqrt, _, ^, \\text, \
+\\cdot, \\le, \\ge, \\ne, \\ldots: "x = \\frac{-b}{2a}". Keep "text" as a readable \
 one-line version ("x = -b / 2a"). "latex" is null for ordinary labels.
 - A symbol that is EMPTY in the image gets "text": "" (empty string). If \
 some characters are unreadable, write only what is readable. Never invent \
 text that is not printed in the image (e.g. never fill an empty box with \
 the formula you expect there).
 - Old scans often print "ə" as "›" or a similar broken glyph (e.g. \
-"daxil edilm›si" means "daxil edilməsi", "h›" means "hə"); write the \
-intended Azerbaijani letter.
+"daxil edilm›si" means "daxil edilməsi", "h›" means "hə", \
+"qiym› tl› rinin" means "qiymətlərinin"); write the intended Azerbaijani \
+letter and keep EVERY syllable — a broken glyph replaces one letter, it \
+never removes a syllable.
 - Numbers printed in the margin beside the symbols (step/row numbers \
 1, 2, 3, ...) are NOT part of the flowchart: ignore them.
 - One edge per arrow, in the arrow's direction. Branch labels on arrows \

@@ -349,3 +349,10 @@ def display_text(text: str, latex: str | None = None) -> str:
         except LatexError:
             pass
     return "\n".join(plain(line) for line in text.split("\n"))
+
+
+def latex_markup(src: str) -> str:
+    """One-line text of a formula with ``_{...}``/``^{...}`` markup, e.g.
+    ``x_{1} = (-b + √D)/(2a)`` (raises ``LatexError``)."""
+    marks = {"sub": "_{%s}", "sup": "^{%s}"}
+    return "".join(marks[v] % t if v else t for t, v in latex_runs(src))

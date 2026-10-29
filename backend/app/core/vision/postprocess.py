@@ -13,6 +13,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from app.core.diagram_detect import Detection, apply_detection
+from app.core.rich_text import LatexError, latex_markup
 from app.models.diagram import DiagramGraph
 from app.models.document import ContentType, VisionAnalysis
 
@@ -20,7 +21,23 @@ logger = logging.getLogger(__name__)
 
 
 def _normalise_graph(graph: DiagramGraph) -> DiagramGraph | None:
-    """Normalise edge labels; return None if the graph has no nodes."""
+    """Normalise labels; return None if the graph has no nodes.
+
+    A formula node's ``text`` is the readable fallback; models sometimes put
+    LaTeX there too (``\\sqrt{D}``), which would surface verbatim wherever
+    the text is used. It is rebuilt from ``latex`` (sub/superscripts kept as
+    markup). Unparseable ``latex`` is dropped so the text is rendered.
+    """
+    for node in graph.nodes:
+        if not node.latex:
+            continue
+        try:
+            linear = latex_markup(node.latex)
+        except LatexError:
+            node.latex = None
+            continue
+        if "\\" in node.text:
+            node.text = linear
     for edge in graph.edges:
         if edge.label is not None and not edge.label.strip():
             edge.label = None

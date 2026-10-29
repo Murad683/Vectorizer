@@ -3300,5 +3300,12 @@ formulas, sub/superscript markup, LaTeX for formulas, caption position.
 
 **Verification**: 474 offline tests; all 4 originals: exact geometry, zero
 `quality_issues`, compared visually in Word and PowerPoint. The real-model
-check (`scripts/live_check.py --all-samples`, 4 calls, ≤ 8 with retries) is
-pending approval.
+check (`scripts/live_check.py`, 2026-10-29) used exactly 4 calls (no
+corrective retry needed): all four graphs topologically correct (document,
+exit and frameless types, branch labels, ports, caption position), exact
+geometry, zero `quality_issues`, verified in Word. Follow-ups from it: the
+model gave LaTeX for an inline "5/9 * (F - 32)" (stacked fraction in Word)
+and read "qiym› tl› rinin" as "qiymətinin"; the prompt now addresses both
+(not yet re-verified live), and LaTeX that leaks into ``text`` is rebuilt
+from ``latex``. The sum caption keeps the source's literal "1 =" (the
+textbook's S is missing in the image; the model no longer invents it).

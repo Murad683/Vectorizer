@@ -1,0 +1,101 @@
+# Vectorizer — production stack for a shared VPS.
+#
+# Isolated from the other projects on the host: own directory (/opt/vectorizer),
+# own network, own named volumes, own port, CPU/RAM limits. The only published
+# port is 127.0.0.1:4300 (a reverse proxy / tunnel forwards to it).
+#
+# Config: /opt/vectorizer/.env on the server (chmod 600, NOT committed). Template:
+# deploy/env.production.example. Compose reads it for ${...} interpolation and the
+# backend receives it via env_file.
+name: vectorizer
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vectorizer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - vectorizer_pgdata:/var/lib/postgresql/data
+    networks: [vectorizer_net]
+    cpus: 0.5
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: &logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    # intentionally no host port mapping — only the backend can reach the DB
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    image: vectorizer-backend:latest
+    container_name: vectorizer-backend
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      ENVIRONMENT: prod
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    volumes:
+      - vectorizer_data:/app/data
+    networks: [vectorizer_net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    cpus: 2
+    mem_limit: 1536m
+    pids_limit: 512
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging: *logging
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    image: vectorizer-web:latest
+    container_name: vectorizer-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4300:8080"
+    networks: [vectorizer_net]
+    depends_on:
+      backend:
+        condition: service_started
+    cpus: 0.25
+    mem_limit: 64m
+    pids_limit: 128
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+networks:
+  vectorizer_net:
+    name: vectorizer_net
+
+volumes:
+  vectorizer_pgdata:
+    name: vectorizer_pgdata
+  vectorizer_data:
+    name: vectorizer_data

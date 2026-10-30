@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+from typing import Any
 
 import graphviz
 
@@ -275,7 +276,7 @@ def layout_graph(graph: DiagramGraph) -> LayoutedGraph:
         px_y = (bb_max_y - gv_y) * _GV_TO_PX + _MARGIN_PX
         return px_x, px_y
 
-    gv_nodes: dict[str, dict] = {}
+    gv_nodes: dict[str, dict[str, Any]] = {}
     for obj in data.get("objects", []):
         gv_nodes[obj["name"]] = obj
 

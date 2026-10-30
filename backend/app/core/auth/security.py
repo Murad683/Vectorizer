@@ -13,6 +13,7 @@ cookie is ever exfiltrated.
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import UUID
 
 import jwt
@@ -64,7 +65,7 @@ def create_access_token(user_id: UUID, role: Role, email: str) -> str:
     return jwt.encode(payload, get_settings().jwt_secret, algorithm=_ALGORITHM)
 
 
-def decode_access_token(token: str) -> dict:
+def decode_access_token(token: str) -> dict[str, Any]:
     """Decode and verify a JWT; raises ``jwt.PyJWTError`` on failure."""
     return jwt.decode(token, get_settings().jwt_secret, algorithms=[_ALGORITHM])
 

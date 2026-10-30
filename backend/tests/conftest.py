@@ -41,11 +41,13 @@ def _migrated_test_database() -> None:
         if result.returncode != 0:
             import warnings
 
-            warnings.warn("Test database not available — DB tests will fail")
+            warnings.warn(
+                "Test database not available — DB tests will fail", stacklevel=2
+            )
     except subprocess.TimeoutExpired:
         import warnings
 
-        warnings.warn("Test database not reachable — DB tests will fail")
+        warnings.warn("Test database not reachable — DB tests will fail", stacklevel=2)
 
 
 @pytest.fixture(autouse=True)

@@ -10,6 +10,7 @@ reproduced; subscript/superscript runs captured by the extractor
 
 import logging
 from io import BytesIO
+from typing import Any
 
 import docx
 from docx.document import Document
@@ -154,7 +155,7 @@ def _add_rich_paragraph(document: Document, text: str) -> None:
             run.font.superscript = True
 
 
-def _remove_table_borders(table) -> None:  # noqa: ANN001
+def _remove_table_borders(table: Any) -> None:
     """Set all tblBorders edges to "nil" so no border/gridline prints.
 
     Scoped to TEXT_CONTENT tables — a matching question has no visible

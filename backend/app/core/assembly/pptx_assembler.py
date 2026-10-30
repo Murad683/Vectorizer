@@ -18,6 +18,7 @@ subscript/superscript runs captured by the extractor are preserved.
 import logging
 from io import BytesIO
 from math import ceil
+from typing import Any
 
 from pptx import Presentation
 from pptx.oxml.ns import qn
@@ -230,7 +231,7 @@ def _add_vision_element(
 _NO_STYLE_NO_GRID_GUID = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"
 
 
-def _remove_pptx_table_borders(table) -> None:  # noqa: ANN001
+def _remove_pptx_table_borders(table: Any) -> None:
     """Set each cell's four border lines to noFill so no grid prints.
 
     Scoped to TEXT_CONTENT tables — a matching question has no visible
@@ -250,7 +251,7 @@ def _remove_pptx_table_borders(table) -> None:  # noqa: ANN001
                 tc_pr.insert(0, ln)
 
 
-def _remove_pptx_table_style(table) -> None:  # noqa: ANN001
+def _remove_pptx_table_style(table: Any) -> None:
     """Strip the colored header/row-banding style layer, not just borders.
 
     Border lines (``a:lnL``/``a:lnR``/``a:lnT``/``a:lnB`` on each cell)

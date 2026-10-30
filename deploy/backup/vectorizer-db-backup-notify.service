@@ -1,0 +1,6 @@
+[Unit]
+Description=Record (and optionally announce) a failed Vectorizer database backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vectorizer-db-backup-notify.sh

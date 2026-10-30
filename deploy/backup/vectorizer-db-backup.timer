@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly Vectorizer database backup timer
+
+[Timer]
+# 03:30, after the shared db-backup.timer (03:00, takes about 8 minutes).
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

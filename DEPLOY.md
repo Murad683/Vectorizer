@@ -108,3 +108,62 @@ docker inspect -f '{{.State.Health.Status}}' vectorizer-cloudflared
 
 Remove it again: `docker compose -p vectorizer -f docker-compose.prod.yml rm -sf cloudflared`,
 delete the `TUNNEL_TOKEN` line from `.env` and delete the tunnel in Zero Trust.
+
+## Database backup
+
+A separate nightly job backs up the Vectorizer database (independent of any other
+backup job on the host, so a failure in one never stops the other).
+
+- `deploy/backup/vectorizer-db-backup.sh` runs `pg_dump -Fc` inside the `vectorizer-db`
+  container (credentials come from the container's own environment), checks that the
+  dump is non-empty and readable by `pg_restore --list` and contains the `users` and
+  `jobs` data, uploads it to the `vectorizer-db-backups` bucket (`rclone` remote
+  `contabo:`), confirms the upload, and only then writes `LAST_SUCCESS`.
+- Retention: 7 days locally (`/var/backups/vectorizer`), 30 days remotely. Both deletions
+  only touch `vectorizer-*.dump` (the remote one via `--include "vectorizer-*.dump"`).
+  `RETENTION_DRY_RUN=1` shows what would be deleted without deleting.
+- Schedule: `vectorizer-db-backup.timer`, every day 03:30 (+ up to 2 minutes).
+- **Install as root-owned copies** (never run it from `/opt/vectorizer`: that directory belongs
+  to the deploy user, and root must not execute a file the deploy user can change):
+
+```bash
+install -m 755 -o root -g root deploy/backup/vectorizer-db-backup.sh        /usr/local/bin/
+install -m 755 -o root -g root deploy/backup/vectorizer-db-backup-notify.sh /usr/local/bin/
+install -m 644 -o root -g root deploy/backup/vectorizer-db-backup.service        /etc/systemd/system/
+install -m 644 -o root -g root deploy/backup/vectorizer-db-backup-notify.service /etc/systemd/system/
+install -m 644 -o root -g root deploy/backup/vectorizer-db-backup.timer          /etc/systemd/system/
+systemctl daemon-reload
+# first time: once by hand, retention only previewed
+RETENTION_DRY_RUN=1 /usr/local/bin/vectorizer-db-backup.sh
+systemctl enable --now vectorizer-db-backup.timer
+```
+
+### Knowing when a backup failed
+- `OnFailure=` starts `vectorizer-db-backup-notify.service`, which appends a line to
+  `/var/backups/vectorizer/FAILED`, writes to the journal (`logger -p user.crit`) and, if
+  `/etc/vectorizer-backup-notify.env` exists (root-only, optional, with
+  `TELEGRAM_BOT_TOKEN=` and `TELEGRAM_CHAT_ID=`), sends a Telegram message.
+- `LAST_SUCCESS` (one line: UTC time, file name, size) exists only after a verified upload.
+  It also reveals runs that never happened (server off, timer disabled), which `OnFailure=`
+  cannot see. Stale check (prints a warning when the last good backup is older than 26 hours):
+
+```bash
+find /var/backups/vectorizer/LAST_SUCCESS -mmin -1560 | grep -q . || echo "BACKUP IS STALE"
+```
+
+### Restore
+```bash
+# list the contents of a dump
+docker exec -i vectorizer-db pg_restore --list < vectorizer-YYYYmmdd-HHMMSS.dump
+# restore into a scratch database first, never straight over the live one
+```
+Download an older dump with `rclone copy contabo:vectorizer-db-backups/<file> .`.
+
+### Not backed up
+The Docker volume `vectorizer_data` (uploaded input files and generated DOCX/PPTX) and
+`/opt/vectorizer/.env`. Losing the volume keeps the job rows in the database but removes
+their files.
+
+### Test the scripts offline
+`bash deploy/backup/test-backup.sh` runs both scripts against stubbed `docker`, `rclone`
+and `curl` in a temporary directory.

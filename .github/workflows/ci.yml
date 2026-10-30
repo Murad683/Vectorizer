@@ -67,9 +67,12 @@ jobs:
           if [ "${{ steps.tests.outcome }}" = "failure" ]; then level=error; fi
           {
             grep -E "^=+ .*(passed|failed|error).* =+$" pytest.log | tail -1
-            grep -E "^(FAILED|ERROR) tests/" pytest.log | head -40 | cut -c1-260
-            echo "--- most common error lines ---"
-            grep -E "^E  " pytest.log | cut -c1-260 | sort | uniq -c | sort -rn | head -12
+            echo "--- failed tests per file ---"
+            grep -E "^(FAILED|ERROR) tests/" pytest.log | sed -E 's/^(FAILED|ERROR) (tests\/[^:]+).*/\1 \2/' | sort | uniq -c | sort -rn | head -40
+            echo "--- failure reasons (first 90 chars) ---"
+            grep -E "^(FAILED|ERROR) tests/" pytest.log | sed -E 's/^[^ ]+ [^ ]+( - )?//' | cut -c1-90 | sort | uniq -c | sort -rn | head -15
+            echo "--- first server traceback ---"
+            grep -m1 -A40 "Unhandled exception while processing request" pytest.log | cut -c1-200
           } > summary.txt
           msg=$(cat summary.txt)
           msg="${msg//'%'/'%25'}"

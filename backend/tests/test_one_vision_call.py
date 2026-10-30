@@ -69,7 +69,9 @@ def test_worker_makes_one_call_per_image_for_docx_and_pptx(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     inner = _Counting(_diagram_result())
-    monkeypatch.setattr("app.core.vision.get_vision_provider", lambda: inner)
+    monkeypatch.setattr(
+        "app.core.vision.get_vision_provider", lambda budget=None: inner
+    )
     docx_path, pptx_path = _process_job_sync(
         str(SAMPLES / "sum_loop.jpg"), tmp_path / "job"
     )

@@ -19,12 +19,13 @@ import traceback
 from pathlib import Path
 
 from app.config import get_settings
+from app.core import vision as vision_pkg
 from app.core.assembly import assemble_docx, assemble_pptx
 from app.core.classifier import classify_elements
 from app.core.ingestion import get_extractor
 from app.core.queue.models import JobStatus
 from app.core.queue.store import JobStore
-from app.core.vision import VisionBudget, VisionBudgetExceededError, get_vision_provider
+from app.core.vision import VisionBudget, VisionBudgetExceededError
 from app.core.vision.cache import CachedVisionProvider
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,9 @@ def _process_job_sync(
 
     if budget is None:
         budget = VisionBudget(limit=get_settings().max_vision_calls_per_job)
-    vision = CachedVisionProvider(factory=lambda: get_vision_provider(budget))
+    vision = CachedVisionProvider(
+        factory=lambda: vision_pkg.get_vision_provider(budget)
+    )
     document = assemble_docx(classified, vision_provider=vision)
     docx_path = output_dir / "output.docx"
     document.save(str(docx_path))

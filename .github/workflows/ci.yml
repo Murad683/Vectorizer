@@ -54,6 +54,8 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           TEST_DATABASE_URL: postgresql://test:test@localhost:5433/vectorizer_test
+          # Throwaway signing key for the auth tests (tests have no .env).
+          JWT_SECRET: ci-only-signing-key-not-a-secret
         run: |
           set -o pipefail
           pytest -ra --tb=short 2>&1 | tee pytest.log

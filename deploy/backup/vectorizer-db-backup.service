@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Vectorizer database backup to Object Storage
+Wants=network-online.target
+After=network-online.target docker.service
+OnFailure=vectorizer-db-backup-notify.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=30min
+ExecStart=/usr/local/bin/vectorizer-db-backup.sh

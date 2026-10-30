@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Vectorizer input file cleanup timer
+
+[Timer]
+# 04:15, after both nightly backups (03:00 shared, 03:30 Vectorizer).
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -96,6 +96,15 @@ class JobStore:
             )
         return _row_to_job(row)
 
+    def list_finished_jobs_before(self, cutoff: datetime) -> list[Job]:
+        """Return COMPLETED/FAILED jobs last updated before ``cutoff``."""
+        rows = self._conn.execute(
+            "SELECT * FROM jobs WHERE status = ANY(%s) AND updated_at < %s "
+            "ORDER BY updated_at",
+            ([JobStatus.COMPLETED.value, JobStatus.FAILED.value], cutoff),
+        ).fetchall()
+        return [_row_to_job(r) for r in rows]
+
     def count_active_jobs(self, owner_user_id: UUID) -> int:
         """Return how many of the user's jobs are PENDING or PROCESSING."""
         row = self._conn.execute(

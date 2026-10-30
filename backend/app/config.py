@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     max_jobs_per_user_per_day: int = Field(default=30, ge=1)
     # Hard ceiling on Gemini requests for one job, retries included.
     max_vision_calls_per_job: int = Field(default=25, ge=1)
+    # Daily cleanup of uploaded INPUT files (python -m app.cleanup_inputs).
+    input_retention_hours: int = Field(default=24, ge=1)
+    input_cleanup_max_per_run: int = Field(default=100, ge=1)
+    input_cleanup_dry_run: bool = False
+    # Reserved: result files (DOCX/PPTX) are never deleted automatically.
+    # 0 = off; nothing reads this value yet.
+    result_retention_days: int = Field(default=0, ge=0)
     frontend_origin: str = "http://localhost:5173"
     # Dev aid: when set, every vision call saves its image, prompt, raw model
     # output and measured geometry under this directory, so layout/render can

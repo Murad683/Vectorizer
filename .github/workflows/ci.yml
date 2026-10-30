@@ -40,17 +40,55 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       # Every check runs even if an earlier one failed, so one red check
-      # (e.g. Ruff) cannot hide the results of the others.
+      # (e.g. Ruff) cannot hide the results of the others. Each tool pipes its
+      # output through `tee` (to a log the annotation step below reads) with
+      # `shell: bash` + pipefail, so the step still fails when the tool fails.
       - name: Ruff
-        run: ruff check app tests
+        id: ruff
+        shell: bash
+        run: |
+          set -o pipefail
+          ruff check --output-format=github app tests | tee ruff.log
 
       - name: Black
+        id: black
         if: ${{ !cancelled() }}
-        run: black --check app tests
+        shell: bash
+        run: |
+          set -o pipefail
+          black --check --diff app tests 2>&1 | tee black.log
 
       - name: Mypy
+        id: mypy
         if: ${{ !cancelled() }}
-        run: mypy app
+        shell: bash
+        run: |
+          set -o pipefail
+          mypy app 2>&1 | tee mypy.log
+
+      # Put the tool results into annotations so they can be read without
+      # opening the raw log. This step never changes a result: the tool step
+      # above stays red when its tool failed.
+      - name: Annotate lint results
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          emit() {  # title, outcome, file
+            [ "$2" = "skipped" ] && return 0
+            level=notice
+            [ "$2" = "failure" ] && level=error
+            msg=$(head -c 3000 "$3" 2>/dev/null)
+            [ -z "$msg" ] && msg="no output (outcome: $2)"
+            msg="${msg//'%'/'%25'}"
+            msg="${msg//$'\n'/'%0A'}"
+            echo "::${level} title=$1 ($2)::${msg}"
+          }
+          grep -oE 'title=Ruff \([A-Z0-9]+\)' ruff.log 2>/dev/null | sort | uniq -c | sort -rn > ruff.summary || true
+          grep -E '^(would reformat|[0-9]+ files? would be|All done|Oh no)' black.log 2>/dev/null > black.summary || true
+          grep -E ' error: |^Found |^Success' mypy.log 2>/dev/null | head -60 > mypy.summary || true
+          emit Ruff "${{ steps.ruff.outcome }}" ruff.summary
+          emit Black "${{ steps.black.outcome }}" black.summary
+          emit Mypy "${{ steps.mypy.outcome }}" mypy.summary
 
       - name: Tests
         id: tests

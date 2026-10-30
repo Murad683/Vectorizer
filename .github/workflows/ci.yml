@@ -36,16 +36,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      # Every check runs even if an earlier one failed, so one red check
+      # (e.g. Ruff) cannot hide the results of the others.
       - name: Ruff
         run: ruff check app tests
 
       - name: Black
+        if: ${{ !cancelled() }}
         run: black --check app tests
 
       - name: Mypy
+        if: ${{ !cancelled() }}
         run: mypy app
 
       - name: Tests
+        id: tests
+        if: ${{ !cancelled() }}
         env:
           TEST_DATABASE_URL: postgresql://test:test@localhost:5433/vectorizer_test
-        run: pytest
+        run: |
+          set -o pipefail
+          pytest -ra --tb=short 2>&1 | tee pytest.log
+
+      # Put the test result into an annotation, so it can be read without
+      # opening the raw log. Red only when the tests themselves failed.
+      - name: Annotate test result
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        run: |
+          msg=$(grep -E "^(FAILED|ERROR) |[0-9]+ (passed|failed|error)" pytest.log | head -40 | cut -c1-300)
+          msg="${msg//'%'/'%25'}"
+          msg="${msg//$'\n'/'%0A'}"
+          level=notice
+          if [ "${{ steps.tests.outcome }}" = "failure" ]; then level=error; fi
+          echo "::${level} title=pytest result::${msg}"

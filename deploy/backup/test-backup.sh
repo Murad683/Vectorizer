@@ -1,5 +1,5 @@
 #!/bin/bash
-# Offline test of the backup scripts with stubbed docker, rclone and curl.
+# Offline test of the backup scripts with stubbed docker, rclone and logger.
 # Touches nothing outside a temporary directory:  bash deploy/backup/test-backup.sh
 set -uo pipefail
 
@@ -39,12 +39,6 @@ if [ "$1" = "lsf" ]; then
   # print the file name given to --include
   while [ $# -gt 0 ]; do [ "$1" = "--include" ] && echo "$2"; shift; done
 fi
-STUB
-
-cat >"$STUBS/curl" <<'STUB'
-#!/bin/bash
-echo "curl $*" >>"$STUB_LOG"
-cat >>"$STUB_LOG" # the config read from stdin (-K -)
 STUB
 
 cat >"$STUBS/logger" <<'STUB'
@@ -136,20 +130,11 @@ DIR="$TMP/n1"
 LOG="$TMP/log-n1"
 : >"$LOG"
 env PATH="$STUBS:$PATH" STUB_LOG="$LOG" VECTORIZER_BACKUP_DIR="$DIR" \
-  VECTORIZER_NOTIFY_CONF="$TMP/missing.env" bash "$HERE/vectorizer-db-backup-notify.sh"
+  bash "$HERE/vectorizer-db-backup-notify.sh"
+NOTIFY_RC=$?
+check "exit code is 0" test "$NOTIFY_RC" -eq 0
 check "FAILED file written" test -s "$DIR/FAILED"
 check "logged to the journal" logged '^logger'
-check "no Telegram call without config" bash -c "! grep -q '^curl' '$LOG'"
-
-DIR="$TMP/n2"
-LOG="$TMP/log-n2"
-: >"$LOG"
-printf 'TELEGRAM_BOT_TOKEN=SECRET123\nTELEGRAM_CHAT_ID=42\n' >"$TMP/notify.env"
-env PATH="$STUBS:$PATH" STUB_LOG="$LOG" VECTORIZER_BACKUP_DIR="$DIR" \
-  VECTORIZER_NOTIFY_CONF="$TMP/notify.env" bash "$HERE/vectorizer-db-backup-notify.sh"
-check "Telegram call made" logged '^curl'
-check "token only on stdin, not in arguments" bash -c "grep '^curl' '$LOG' | grep -vq SECRET123"
-check "token reached curl via stdin" logged 'bot SECRET123\|botSECRET123'
 
 echo
 echo "passed: $PASS  failed: $FAIL"

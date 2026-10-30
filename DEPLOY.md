@@ -140,9 +140,9 @@ systemctl enable --now vectorizer-db-backup.timer
 
 ### Knowing when a backup failed
 - `OnFailure=` starts `vectorizer-db-backup-notify.service`, which appends a line to
-  `/var/backups/vectorizer/FAILED`, writes to the journal (`logger -p user.crit`) and, if
-  `/etc/vectorizer-backup-notify.env` exists (root-only, optional, with
-  `TELEGRAM_BOT_TOKEN=` and `TELEGRAM_CHAT_ID=`), sends a Telegram message.
+  `/var/backups/vectorizer/FAILED` and writes a critical journal entry
+  (`journalctl -t vectorizer-backup`). There is no push notification (no mail or
+  chat channel on the host): somebody has to look, so check the two files below.
 - `LAST_SUCCESS` (one line: UTC time, file name, size) exists only after a verified upload.
   It also reveals runs that never happened (server off, timer disabled), which `OnFailure=`
   cannot see. Stale check (prints a warning when the last good backup is older than 26 hours):
@@ -166,4 +166,4 @@ their files.
 
 ### Test the scripts offline
 `bash deploy/backup/test-backup.sh` runs both scripts against stubbed `docker`, `rclone`
-and `curl` in a temporary directory.
+and `logger` in a temporary directory.

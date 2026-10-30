@@ -1,0 +1,27 @@
+# Production image for the FastAPI backend (used by docker-compose.prod.yml).
+# The dev image (backend/Dockerfile) is left untouched.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Graphviz system binary — required by the layout engine.
+RUN apt-get update && apt-get install -y --no-install-recommends graphviz \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install dependencies first to leverage Docker layer caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Run as an unprivileged user. data/ holds uploads and job outputs (the app
+# uses the relative path "data/"); it is mounted as a named volume.
+RUN useradd --system --uid 10001 --home-dir /app app \
+    && mkdir -p /app/data \
+    && chown -R app:app /app/data
+USER app
+
+EXPOSE 8000
+
+# One uvicorn process only: the job worker is an in-process asyncio task.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]

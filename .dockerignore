@@ -1,0 +1,9 @@
+samples/
+data/
+backend/data/
+backend/tests/
+docs/
+.git/
+.github/
+node_modules/
+.env

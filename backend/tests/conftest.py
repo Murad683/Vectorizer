@@ -66,7 +66,8 @@ def _truncate_all() -> None:
     """Wipe all tables for per-test isolation (cheap vs. a fresh DB)."""
     with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE TABLE jobs, users, refresh_tokens RESTART IDENTITY CASCADE"
+            "TRUNCATE TABLE jobs, users, refresh_tokens, job_submissions "
+            "RESTART IDENTITY CASCADE"
         )
 
 

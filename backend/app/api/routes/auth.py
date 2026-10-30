@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -27,6 +28,7 @@ from app.core.auth.security import (
     generate_refresh_token,
     hash_refresh_token,
     verify_password,
+    verify_password_dummy,
 )
 from app.core.auth.store import RefreshTokenStore, UserStore
 from app.models.errors import ErrorResponse
@@ -103,11 +105,17 @@ async def login(body: LoginRequest, request: Request) -> JSONResponse:
     refresh_store: RefreshTokenStore = request.app.state.refresh_token_store
     user = store.get_user_by_email(body.email)
 
-    if (
-        user is None
-        or not verify_password(body.password, user.hashed_password)
-        or not user.is_active
-    ):
+    # bcrypt is CPU-bound: keep it off the event loop so a burst of login
+    # attempts cannot stall every other request. An unknown email costs the
+    # same hash check, so response time does not reveal which emails exist.
+    if user is None:
+        await run_in_threadpool(verify_password_dummy, body.password)
+        password_ok = False
+    else:
+        password_ok = await run_in_threadpool(
+            verify_password, body.password, user.hashed_password
+        )
+    if user is None or not password_ok or not user.is_active:
         return _unauthorized(
             request, "invalid_credentials", "Invalid email or password."
         )

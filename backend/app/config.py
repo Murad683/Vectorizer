@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     max_upload_size_mb: int = 30
     max_pages_per_file: int = 50
+    # Abuse / cost limits. Every job can cost Gemini calls, so each limit is
+    # enforced server-side and can be raised in .env.
+    max_active_jobs_per_user: int = Field(default=3, ge=1)
+    max_jobs_per_user_per_day: int = Field(default=30, ge=1)
+    # Hard ceiling on Gemini requests for one job, retries included.
+    max_vision_calls_per_job: int = Field(default=25, ge=1)
     frontend_origin: str = "http://localhost:5173"
     # Dev aid: when set, every vision call saves its image, prompt, raw model
     # output and measured geometry under this directory, so layout/render can

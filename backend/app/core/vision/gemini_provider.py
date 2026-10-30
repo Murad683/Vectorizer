@@ -14,6 +14,7 @@ from google.genai import types as genai_types
 from app.config import get_settings
 from app.core.diagram_detect import Detection, annotate, detect
 from app.core.vision.base import VisionProvider
+from app.core.vision.budget import VisionBudget, VisionBudgetExceededError
 from app.core.vision.debug_dump import DebugDump
 from app.core.vision.postprocess import (
     attach_geometry,
@@ -167,8 +168,9 @@ def _is_transient(exc: Exception) -> bool:
 class GeminiVisionProvider(VisionProvider):
     """Diagram analysis backed by the Google Gemini API (JSON mode)."""
 
-    def __init__(self) -> None:
+    def __init__(self, budget: VisionBudget | None = None) -> None:
         settings = get_settings()
+        self._budget = budget
         if not settings.gemini_api_key:
             raise ValueError(
                 "GEMINI_API_KEY is not configured; cannot create Gemini provider."
@@ -180,6 +182,11 @@ class GeminiVisionProvider(VisionProvider):
             response_schema=VisionAnalysis,
             http_options=genai_types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
         )
+
+    def _consume_budget(self) -> None:
+        """Count one Gemini request against the job's ceiling, if there is one."""
+        if self._budget is not None:
+            self._budget.consume()
 
     def _retry_topology(
         self, contents: list[str | genai_types.Part], problems: list[str]
@@ -197,11 +204,14 @@ class GeminiVisionProvider(VisionProvider):
             "that are drawn — do not invent arrows to satisfy these rules."
         )
         try:
+            self._consume_budget()
             response = self._client.models.generate_content(
                 model=self._model_name,
                 contents=[*contents[:-1], str(contents[-1]) + fix],  # type: ignore[arg-type]
                 config=self._config,
             )
+        except VisionBudgetExceededError:
+            raise
         except Exception:  # noqa: BLE001 - keep the first answer
             logger.exception("Topology retry failed")
             return None, ""
@@ -252,6 +262,7 @@ class GeminiVisionProvider(VisionProvider):
         analysis: VisionAnalysis | None = None
         for attempt in range(1 + _MAX_RETRIES):
             try:
+                self._consume_budget()
                 response = self._client.models.generate_content(
                     model=self._model_name,
                     # mypy: the SDK's contents union spells Image as
@@ -273,6 +284,8 @@ class GeminiVisionProvider(VisionProvider):
                 )
                 if attempt < _MAX_RETRIES:
                     time.sleep(_RETRY_DELAY_SECONDS)
+            except VisionBudgetExceededError:
+                raise
             except Exception as exc:  # noqa: BLE001 - must not crash pipeline
                 last_error = exc
                 if not _is_transient(exc):

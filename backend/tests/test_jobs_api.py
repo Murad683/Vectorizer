@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.core.auth.models import Role
 from app.core.auth.security import hash_password
 from app.core.auth.store import RefreshTokenStore, UserStore
@@ -23,6 +24,14 @@ from app.main import create_app
 @asynccontextmanager
 async def _noop_lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
+
+
+@pytest.fixture(autouse=True)
+def _generous_job_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests upload many files as one user; the limits have own tests."""
+    monkeypatch.setenv("MAX_ACTIVE_JOBS_PER_USER", "1000")
+    monkeypatch.setenv("MAX_JOBS_PER_USER_PER_DAY", "1000")
+    get_settings.cache_clear()
 
 
 @pytest.fixture()

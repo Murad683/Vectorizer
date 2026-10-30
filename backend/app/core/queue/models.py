@@ -47,5 +47,6 @@ class Job(BaseModel):
     error_message: str | None = None
     retry_count: int = Field(default=0)
     max_retries: int = Field(default=2)
+    vision_calls: int = Field(default=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -40,6 +40,7 @@ def _row_to_job(row: DictRow) -> Job:
         error_message=row["error_message"],
         retry_count=row["retry_count"],
         max_retries=row["max_retries"],
+        vision_calls=row["vision_calls"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -85,7 +86,38 @@ class JobStore:
             ),
         ).fetchone()
         assert row is not None
+        if owner_user_id is not None:
+            # Insert-only log behind the daily limit: unlike ``jobs`` rows it
+            # survives ``delete_job``.
+            self._conn.execute(
+                "INSERT INTO job_submissions (id, owner_user_id, created_at) "
+                "VALUES (%s, %s, %s)",
+                (job_id, owner_user_id, now),
+            )
         return _row_to_job(row)
+
+    def count_active_jobs(self, owner_user_id: UUID) -> int:
+        """Return how many of the user's jobs are PENDING or PROCESSING."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM jobs "
+            "WHERE owner_user_id = %s AND status = ANY(%s)",
+            (
+                owner_user_id,
+                [JobStatus.PENDING.value, JobStatus.PROCESSING.value],
+            ),
+        ).fetchone()
+        assert row is not None
+        return int(row["c"])
+
+    def count_submissions_since(self, owner_user_id: UUID, since: datetime) -> int:
+        """Return how many jobs the user submitted at or after ``since``."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM job_submissions "
+            "WHERE owner_user_id = %s AND created_at >= %s",
+            (owner_user_id, since),
+        ).fetchone()
+        assert row is not None
+        return int(row["c"])
 
     def get_job(self, job_id: UUID) -> Job | None:
         """Return the job with the given id, or None."""
@@ -173,6 +205,39 @@ class JobStore:
             values,
         ).fetchone()
         return _row_to_job(row) if row is not None else None
+
+    def recover_interrupted_jobs(self) -> int:
+        """Re-queue jobs a previous process left in PROCESSING; return how many.
+
+        Only one worker runs, so at startup nothing can legitimately be
+        PROCESSING: those jobs were cut off by a restart or crash. Left alone
+        they would never finish and would hold one of the user's active-job
+        slots forever. The interrupted run counts as an attempt, so a job
+        that keeps killing the process ends up FAILED instead of looping.
+        """
+        now = datetime.now(timezone.utc)
+        self._conn.execute(
+            """
+            UPDATE jobs
+            SET status = %s, error_message = %s, updated_at = %s
+            WHERE status = %s AND retry_count >= max_retries
+            """,
+            (
+                JobStatus.FAILED.value,
+                "Server yenidən başladığı üçün iş yarımçıq qaldı.",
+                now,
+                JobStatus.PROCESSING.value,
+            ),
+        )
+        cursor = self._conn.execute(
+            """
+            UPDATE jobs
+            SET status = %s, retry_count = retry_count + 1, updated_at = %s
+            WHERE status = %s
+            """,
+            (JobStatus.PENDING.value, now, JobStatus.PROCESSING.value),
+        )
+        return cursor.rowcount
 
     def claim_next_pending_job(self) -> Job | None:
         """Atomically claim the oldest PENDING job, or return None.

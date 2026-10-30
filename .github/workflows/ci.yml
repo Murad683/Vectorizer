@@ -33,19 +33,53 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
 
+      - name: Install Graphviz
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends graphviz
+
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      # Every check runs even if an earlier one failed, so one red check
+      # (e.g. Ruff) cannot hide the results of the others.
       - name: Ruff
         run: ruff check app tests
 
       - name: Black
+        if: ${{ !cancelled() }}
         run: black --check app tests
 
       - name: Mypy
+        if: ${{ !cancelled() }}
         run: mypy app
 
       - name: Tests
+        id: tests
+        if: ${{ !cancelled() }}
         env:
           TEST_DATABASE_URL: postgresql://test:test@localhost:5433/vectorizer_test
-        run: pytest
+          # Throwaway signing key for the auth tests (tests have no .env).
+          JWT_SECRET: ci-only-signing-key-not-a-secret
+        run: |
+          set -o pipefail
+          pytest -ra --tb=short 2>&1 | tee pytest.log
+
+      # Put the test result into annotations, so it can be read without
+      # opening the raw log. Red only when the tests themselves failed.
+      - name: Annotate test result
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        run: |
+          level=notice
+          if [ "${{ steps.tests.outcome }}" = "failure" ]; then level=error; fi
+          {
+            grep -E "^=+ .*(passed|failed|error).* =+$" pytest.log | tail -1
+            echo "--- failed tests per file ---"
+            grep -E "^(FAILED|ERROR) tests/" pytest.log | sed -E 's/^(FAILED|ERROR) (tests\/[^:]+).*/\1 \2/' | sort | uniq -c | sort -rn | head -40
+            echo "--- failure reasons (first 90 chars) ---"
+            grep -E "^(FAILED|ERROR) tests/" pytest.log | sed -E 's/^[^ ]+ [^ ]+( - )?//' | cut -c1-90 | sort | uniq -c | sort -rn | head -15
+            echo "--- first server traceback ---"
+            grep -m1 -A40 "Unhandled exception while processing request" pytest.log | cut -c1-200
+          } > summary.txt
+          msg=$(cat summary.txt)
+          msg="${msg//'%'/'%25'}"
+          msg="${msg//$'\n'/'%0A'}"
+          echo "::${level} title=pytest result::${msg}"

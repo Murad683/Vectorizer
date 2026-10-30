@@ -22,9 +22,7 @@ def _get_user_store(request: Request) -> UserStore:
 def _error_response(status_code: int, error_code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
-        content=ErrorResponse(
-            error_code=error_code, message=message
-        ).model_dump(),
+        content=ErrorResponse(error_code=error_code, message=message).model_dump(),
     )
 
 
@@ -47,7 +45,7 @@ async def get_current_user(
     except jwt.PyJWTError:
         raise _AuthError(
             _error_response(401, "invalid_token", "Token is invalid or expired.")
-        )
+        ) from None
 
     user_id = UUID(payload["sub"])
     store = _get_user_store(request)
@@ -67,9 +65,7 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
     Raises 403 if the user is not an admin.
     """
     if user.role != Role.ADMIN:
-        raise _AuthError(
-            _error_response(403, "forbidden", "Admin access required.")
-        )
+        raise _AuthError(_error_response(403, "forbidden", "Admin access required."))
     return user
 
 

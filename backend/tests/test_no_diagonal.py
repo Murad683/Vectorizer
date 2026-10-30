@@ -55,7 +55,9 @@ def _linear(n: int) -> DiagramGraph:
     """Straight chain: Start → P1 → P2 → … → End."""
     nodes = [DiagramNode(id="s", shape_type=ShapeType.TERMINATOR, text="Start")]
     for i in range(1, n + 1):
-        nodes.append(DiagramNode(id=f"p{i}", shape_type=ShapeType.PROCESS, text=f"P{i}"))
+        nodes.append(
+            DiagramNode(id=f"p{i}", shape_type=ShapeType.PROCESS, text=f"P{i}")
+        )
     nodes.append(DiagramNode(id="e", shape_type=ShapeType.TERMINATOR, text="End"))
     edges = [DiagramEdge(source_id="s", target_id="p1")]
     for i in range(1, n):
@@ -640,9 +642,9 @@ def _check_no_diagonal_pptx(pptx_path: Path) -> None:
                 continue
             cx = int(ext.get("cx", "0"))
             cy = int(ext.get("cy", "0"))
-            assert abs(cx) <= 1 or abs(cy) <= 1, (
-                f"Diagonal straightConnector1 in PPTX: cx={cx}, cy={cy}"
-            )
+            assert (
+                abs(cx) <= 1 or abs(cy) <= 1
+            ), f"Diagonal straightConnector1 in PPTX: cx={cx}, cy={cy}"
 
 
 def _check_all_glued_pptx(pptx_path: Path, expected_edges: int) -> None:
@@ -653,12 +655,12 @@ def _check_all_glued_pptx(pptx_path: Path, expected_edges: int) -> None:
         connectors = [s for s in slide.shapes if isinstance(s, Connector)]
         assert len(connectors) == expected_edges
         for conn in connectors:
-            assert conn._element.find(".//a:stCxn", ns) is not None, (
-                "Connector missing stCxn"
-            )
-            assert conn._element.find(".//a:endCxn", ns) is not None, (
-                "Connector missing endCxn"
-            )
+            assert (
+                conn._element.find(".//a:stCxn", ns) is not None
+            ), "Connector missing stCxn"
+            assert (
+                conn._element.find(".//a:endCxn", ns) is not None
+            ), "Connector missing endCxn"
 
 
 # ── DOCX invariant checks ─────────────────────────────────────────
@@ -685,9 +687,9 @@ def _check_no_diagonal_docx(docx_path: Path) -> None:
             continue
         cx = int(ext.get("cx", "0"))
         cy = int(ext.get("cy", "0"))
-        assert abs(cx) <= 1 or abs(cy) <= 1, (
-            f"Diagonal straightConnector1 in DOCX: cx={cx}, cy={cy}"
-        )
+        assert (
+            abs(cx) <= 1 or abs(cy) <= 1
+        ), f"Diagonal straightConnector1 in DOCX: cx={cx}, cy={cy}"
 
 
 def _check_all_glued_docx(docx_path: Path, expected_edges: int) -> None:
@@ -710,9 +712,7 @@ def _check_all_glued_docx(docx_path: Path, expected_edges: int) -> None:
 _topo_ids = [t[0] for t in ALL_TOPOLOGIES]
 _topo_graphs = [t[1] for t in ALL_TOPOLOGIES]
 
-_topologies_with_edges = [
-    (name, g) for name, g in ALL_TOPOLOGIES if len(g.edges) > 0
-]
+_topologies_with_edges = [(name, g) for name, g in ALL_TOPOLOGIES if len(g.edges) > 0]
 _topo_with_edges_ids = [t[0] for t in _topologies_with_edges]
 _topo_with_edges_graphs = [t[1] for t in _topologies_with_edges]
 
@@ -783,7 +783,7 @@ class TestNoNodeOverlap:
         layouted = layout_graph(graph)
         nodes = layouted.nodes
         for i, a in enumerate(nodes):
-            for b in nodes[i + 1:]:
+            for b in nodes[i + 1 :]:
                 assert not _overlaps(a, b), f"{a.id} overlaps {b.id}"
 
 
@@ -806,7 +806,9 @@ _BEND_COUNT_BY_PRESET = {
 _RENDER_MARGIN_EMU = 2 * 9525  # ~2px tolerance, matches _segment_crosses_node
 
 
-def _site_point(box: tuple[float, float, float, float], idx: int) -> tuple[float, float]:
+def _site_point(
+    box: tuple[float, float, float, float], idx: int
+) -> tuple[float, float]:
     x0, y0, x1, y1 = box
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     if idx == _CXN_TOP:
@@ -893,19 +895,19 @@ def _extract_pptx_render_geometry(pptx_path: Path):
     for el in slide_xml.iter():
         tag = etree.QName(el).localname
         if tag == "sp":
-            cNvPr = el.find(".//p:nvSpPr/p:cNvPr", ns)
+            c_nv_pr = el.find(".//p:nvSpPr/p:cNvPr", ns)
             xfrm = el.find(".//a:xfrm", ns)
-            if xfrm is None or cNvPr is None:
+            if xfrm is None or c_nv_pr is None:
                 continue
             off = xfrm.find("a:off", ns)
             ext = xfrm.find("a:ext", ns)
             x, y = float(off.get("x")), float(off.get("y"))
             cx, cy = float(ext.get("cx")), float(ext.get("cy"))
             box = (x, y, x + cx, y + cy)
-            node_boxes[cNvPr.get("id")] = box
+            node_boxes[c_nv_pr.get("id")] = box
             avoid_boxes.append(box)
         elif tag == "cxnSp":
-            cNvPr = el.find(".//p:nvCxnSpPr/p:cNvPr", ns)
+            c_nv_pr = el.find(".//p:nvCxnSpPr/p:cNvPr", ns)
             xfrm = el.find(".//a:xfrm", ns)
             prst = el.find(".//a:prstGeom", ns)
             st = el.find(".//a:stCxn", ns)
@@ -915,7 +917,7 @@ def _extract_pptx_render_geometry(pptx_path: Path):
             gds = el.findall(".//a:gd", ns)
             connectors.append(
                 {
-                    "id": cNvPr.get("id"),
+                    "id": c_nv_pr.get("id"),
                     "prst": prst.get("prst"),
                     "st_id": st.get("id"),
                     "st_idx": int(st.get("idx")),
@@ -934,10 +936,10 @@ def _extract_docx_render_geometry(docx_path: Path):
     avoid_boxes: list[tuple[float, float, float, float]] = []
     connectors: list[dict] = []
     for wsp in root.iter("{%s}wsp" % _NS_WPS):
-        cNvPr = wsp.find("{%s}cNvPr" % _NS_WPS)
-        if cNvPr is None:
+        c_nv_pr = wsp.find("{%s}cNvPr" % _NS_WPS)
+        if c_nv_pr is None:
             continue
-        name = cNvPr.get("name", "")
+        name = c_nv_pr.get("name", "")
         xfrm = wsp.find(".//{%s}xfrm" % _NS_A)
         if xfrm is None:
             continue
@@ -956,7 +958,7 @@ def _extract_docx_render_geometry(docx_path: Path):
             gds = wsp.findall(".//{%s}gd" % _NS_A)
             connectors.append(
                 {
-                    "id": cNvPr.get("id"),
+                    "id": c_nv_pr.get("id"),
                     "prst": prst_geom.get("prst"),
                     "st_id": st.get("id"),
                     "st_idx": int(st.get("idx")),
@@ -966,11 +968,10 @@ def _extract_docx_render_geometry(docx_path: Path):
                 }
             )
         elif name.startswith("node-"):
-            node_boxes[cNvPr.get("id")] = box
+            node_boxes[c_nv_pr.get("id")] = box
             avoid_boxes.append(box)
         elif name.startswith("label-"):
             avoid_boxes.append(box)
-
 
     return node_boxes, avoid_boxes, connectors
 
@@ -991,7 +992,7 @@ def _check_no_rendered_crossing(
             start_pt, end_pt, conn["st_idx"], conn["en_idx"], conn["prst"], conn["adjs"]
         )
         for box in avoid_boxes:
-            if box == st_box or box == en_box:
+            if box in (st_box, en_box):
                 continue
             for i in range(1, len(pts)):
                 assert not _polyline_segment_crosses_box(pts[i - 1], pts[i], box), (
@@ -1013,22 +1014,32 @@ def _check_no_rendered_crossing(
 # separate change from the back-edge routing fix this phase delivers.
 # Tracked here rather than silently ignored.
 _KNOWN_RENDER_CROSSING_LIMITATIONS = {
-    "three_way_fork", "nested_loops", "decision_chain_3", "loop_with_exit_fork",
-    "two_loops_sequential", "all_shape_types", "self_loop",
+    "three_way_fork",
+    "nested_loops",
+    "decision_chain_3",
+    "loop_with_exit_fork",
+    "two_loops_sequential",
+    "all_shape_types",
+    "self_loop",
 }
 
 
 def _crossing_params():
     return [
-        pytest.param(
-            g, id=name,
-            marks=pytest.mark.xfail(
-                reason="Known limitation: connection-site selection for "
-                "diamonds isn't conflict-aware in tightly packed layouts "
-                "(see _KNOWN_RENDER_CROSSING_LIMITATIONS docstring)",
-                strict=False,
-            ),
-        ) if name in _KNOWN_RENDER_CROSSING_LIMITATIONS else pytest.param(g, id=name)
+        (
+            pytest.param(
+                g,
+                id=name,
+                marks=pytest.mark.xfail(
+                    reason="Known limitation: connection-site selection for "
+                    "diamonds isn't conflict-aware in tightly packed layouts "
+                    "(see _KNOWN_RENDER_CROSSING_LIMITATIONS docstring)",
+                    strict=False,
+                ),
+            )
+            if name in _KNOWN_RENDER_CROSSING_LIMITATIONS
+            else pytest.param(g, id=name)
+        )
         for name, g in _topologies_with_edges
     ]
 

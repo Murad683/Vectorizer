@@ -229,9 +229,7 @@ class TestDocxCanvas:
                 or l_bottom <= d_top
                 or l_top >= d_bottom
             )
-            assert no_overlap, (
-                f"Label '{label_text}' overlaps decision shape"
-            )
+            assert no_overlap, f"Label '{label_text}' overlaps decision shape"
 
     def test_unique_cnvpr_ids(
         self, flowchart_graph: DiagramGraph, tmp_path: Path
@@ -257,9 +255,7 @@ class TestBackEdgeDetourDocx:
         detours = [
             w
             for w in body.findall(".//wps:wsp", _NS)
-            if w.find("wps:cNvPr", _NS)
-            .get("name", "")
-            .startswith("backedge-detour")
+            if w.find("wps:cNvPr", _NS).get("name", "").startswith("backedge-detour")
         ]
         backs = [
             w
@@ -283,9 +279,7 @@ class TestBackEdgeDetourDocx:
                 if name.endswith((".xml", ".rels")):
                     etree.fromstring(zf.read(name))
 
-    def test_unique_ids(
-        self, collision_graph: DiagramGraph, tmp_path: Path
-    ) -> None:
+    def test_unique_ids(self, collision_graph: DiagramGraph, tmp_path: Path) -> None:
         path = _build_docx(collision_graph, tmp_path / "detour.docx")
         body = _body(path)
         ids = [c.get("id") for c in body.findall(".//wps:cNvPr", _NS)]
@@ -383,9 +377,9 @@ class TestLabelPositioningDocx:
                 int(off.get("y")),
             )
         assert "Hə" in label_positions and "Yox" in label_positions
-        assert label_positions["Hə"] != label_positions["Yox"], (
-            f"Labels at identical position: {label_positions['Hə']}"
-        )
+        assert (
+            label_positions["Hə"] != label_positions["Yox"]
+        ), f"Labels at identical position: {label_positions['Hə']}"
 
     def test_three_sibling_labels_no_overlap(self, tmp_path: Path) -> None:
         """A decision with 3 labeled edges — all labels must be mutually
@@ -435,9 +429,9 @@ class TestLabelPositioningDocx:
         layouted = layout_graph(collision_graph)
         for edge in layouted.edges:
             if edge.label:
-                assert edge.label_x is not None, (
-                    f"Edge {edge.source_id}->{edge.target_id} missing label_x"
-                )
-                assert edge.label_y is not None, (
-                    f"Edge {edge.source_id}->{edge.target_id} missing label_y"
-                )
+                assert (
+                    edge.label_x is not None
+                ), f"Edge {edge.source_id}->{edge.target_id} missing label_x"
+                assert (
+                    edge.label_y is not None
+                ), f"Edge {edge.source_id}->{edge.target_id} missing label_y"

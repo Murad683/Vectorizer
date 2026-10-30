@@ -1,6 +1,7 @@
 """Tests for the background job queue: store, worker retry logic, and API."""
 
 import asyncio
+import contextlib
 import threading
 import time
 from pathlib import Path
@@ -199,10 +200,8 @@ class TestWorkerPipelineFailure:
                     if job and job.status == JobStatus.FAILED:
                         break
                 task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-                except asyncio.CancelledError:
-                    pass
 
             asyncio.run(run_briefly())
 

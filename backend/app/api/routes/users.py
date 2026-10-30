@@ -1,6 +1,7 @@
 """User management routes (admin-only): create, list, deactivate, delete users."""
 
 import logging
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
@@ -35,7 +36,7 @@ class UpdateUserRequest(BaseModel):
     is_active: bool
 
 
-def _user_response(user: User, job_count: int) -> dict:
+def _user_response(user: User, job_count: int) -> dict[str, Any]:
     """Serialise a User for the API response — never includes the hash.
 
     ``job_count`` lets the frontend proactively disable the delete

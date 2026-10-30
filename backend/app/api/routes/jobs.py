@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Request, UploadFile
@@ -70,7 +71,8 @@ async def create_job(
         return _error(
             400,
             "unsupported_format",
-            f"Unsupported file type '{ext}'. Supported: {', '.join(sorted(_SUPPORTED_EXTENSIONS))}",
+            f"Unsupported file type '{ext}'. "
+            f"Supported: {', '.join(sorted(_SUPPORTED_EXTENSIONS))}",
             request,
         )
 
@@ -190,9 +192,9 @@ async def get_job_status(
     return JSONResponse(content=_job_response(job))
 
 
-def _job_response(job: Job) -> dict:
+def _job_response(job: Job) -> dict[str, Any]:
     """Build the JSON response body for a job."""
-    body: dict = {
+    body: dict[str, Any] = {
         "job_id": str(job.id),
         "status": job.status.value,
         "input_filename": job.input_filename,

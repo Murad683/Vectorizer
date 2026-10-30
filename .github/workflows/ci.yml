@@ -83,7 +83,7 @@ jobs:
             msg="${msg//$'\n'/'%0A'}"
             echo "::${level} title=$1 ($2)::${msg}"
           }
-          grep -oE 'title=Ruff \([A-Z0-9]+\)' ruff.log 2>/dev/null | sort | uniq -c | sort -rn > ruff.summary || true
+          grep -oE 'Ruff \([A-Z0-9]+\)' ruff.log 2>/dev/null | sort | uniq -c | sort -rn > ruff.summary || true
           grep -E '^(would reformat|[0-9]+ files? would be|All done|Oh no)' black.log 2>/dev/null > black.summary || true
           grep -E ' error: |^Found |^Success' mypy.log 2>/dev/null | head -60 > mypy.summary || true
           emit Ruff "${{ steps.ruff.outcome }}" ruff.summary

@@ -14,7 +14,7 @@ from app.core.ingestion.docx_extractor import DocxExtractor
 from app.core.layout import layout_graph
 from app.core.render.pptx_shapes import add_diagram_to_slide
 from app.core.render.svg_debug import render_svg
-from app.models.diagram import DiagramEdge, DiagramGraph, DiagramNode, ShapeType
+from app.models.diagram import DiagramGraph
 from app.models.document import ElementType, VisionResult
 
 
@@ -207,9 +207,7 @@ class TestPptxShapes:
                 or l_bottom <= d_top
                 or l_top >= d_bottom
             )
-            assert no_overlap, (
-                f"Label '{label_text}' overlaps decision shape"
-            )
+            assert no_overlap, f"Label '{label_text}' overlaps decision shape"
 
 
 class TestBackEdgePptx:
@@ -252,8 +250,7 @@ class TestBackEdgePptx:
             if not isinstance(s, Connector)
             and s._element.find(".//a:custGeom", ns) is not None
             and s._element.find(".//a:custGeom//a:path", ns) is not None
-            and s._element.find(".//a:custGeom//a:path", ns).get("fill")
-            == "none"
+            and s._element.find(".//a:custGeom//a:path", ns).get("fill") == "none"
         ]
         assert len(freeforms) == 0
         connectors = [s for s in slide.shapes if isinstance(s, Connector)]
@@ -378,6 +375,6 @@ class TestLabelPositioningPptx:
             if s.has_text_frame and s.text_frame.text in ("Hə", "Yox"):
                 label_positions[s.text_frame.text] = (s.left, s.top)
         assert "Hə" in label_positions and "Yox" in label_positions
-        assert label_positions["Hə"] != label_positions["Yox"], (
-            f"Labels at identical position: {label_positions['Hə']}"
-        )
+        assert (
+            label_positions["Hə"] != label_positions["Yox"]
+        ), f"Labels at identical position: {label_positions['Hə']}"

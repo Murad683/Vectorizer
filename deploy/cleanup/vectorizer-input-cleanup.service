@@ -1,0 +1,9 @@
+[Unit]
+Description=Delete old uploaded input files of finished Vectorizer jobs
+After=docker.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=10min
+SyslogIdentifier=vectorizer-input-cleanup
+ExecStart=/usr/local/bin/vectorizer-input-cleanup.sh

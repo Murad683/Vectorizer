@@ -167,3 +167,45 @@ their files.
 ### Test the scripts offline
 `bash deploy/backup/test-backup.sh` runs both scripts against stubbed `docker`, `rclone`
 and `logger` in a temporary directory.
+
+## Input file cleanup
+
+Uploaded input files are only needed while a job waits or runs. A daily job deletes
+them `INPUT_RETENTION_HOURS` (default 24) after the job is `completed` or `failed`.
+
+- **Deleted:** input files of old finished jobs; uploads that have no job row at all and are
+  older than the limit (crashed uploads); empty `data/jobs/<uuid>` directories whose job is
+  not waiting or running.
+- **Never touched:** files of `pending` / `processing` jobs (a failed attempt puts a job
+  back to `pending`, so its input stays for the retry), result files (DOCX/PPTX), any
+  directory that still holds files, and the database rows. A directory with files but no
+  job row is only reported in the log.
+- At most `INPUT_CLEANUP_MAX_PER_RUN` (default 100) things per run; the rest waits for the
+  next run. Only `unlink` and `rmdir` are used, never a recursive delete.
+- `RESULT_RETENTION_DAYS` is reserved (0 = off) and not used by any code: results are
+  never deleted automatically.
+
+Dry run (lists what would be deleted, deletes nothing; `--hours 0` ignores the age):
+
+```bash
+docker exec vectorizer-backend python -m app.cleanup_inputs --dry-run
+docker exec vectorizer-backend python -m app.cleanup_inputs --dry-run --hours 0
+```
+
+Schedule (root-owned copies, like the backup):
+
+```bash
+install -m 755 -o root -g root deploy/cleanup/vectorizer-input-cleanup.sh      /usr/local/bin/
+install -m 644 -o root -g root deploy/cleanup/vectorizer-input-cleanup.service /etc/systemd/system/
+install -m 644 -o root -g root deploy/cleanup/vectorizer-input-cleanup.timer   /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now vectorizer-input-cleanup.timer     # every day 04:15
+```
+
+Every deleted file is one journal line: `journalctl -t vectorizer-input-cleanup`
+(`DELETED ...` / `WOULD DELETE ...` and a summary). A failed run shows in
+`systemctl status vectorizer-input-cleanup.service`.
+
+What to tell customers: *uploaded source files are deleted from the server 24 hours after
+the job finishes; the finished DOCX/PPTX files and the job history stay; to convert a source
+file again, upload it again.*

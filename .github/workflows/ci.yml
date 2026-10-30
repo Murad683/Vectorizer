@@ -33,6 +33,9 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
 
+      - name: Install Graphviz
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends graphviz
+
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 

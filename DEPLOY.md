@@ -6,14 +6,17 @@ with them: own directory, network (`vectorizer_net`), volumes
 (`vectorizer_pgdata`, `vectorizer_data`) and port.
 
 ```
-reverse proxy / tunnel -> http://localhost:4300 -> web (nginx, 64 MB)
+Cloudflare -> cloudflared (own tunnel, 0.25 CPU / 128 MB) -> http://web:8080
                                                 |- /      static React build
                                                 `- /api/  -> backend:8000 (FastAPI, 2 CPU / 1.5 GB)
                                                                 `- postgres:5432 (0.5 CPU / 384 MB)
 ```
 
-- Only `127.0.0.1:4300` is published on the host. The DB has no host port.
-- Point your public hostname (`<your-domain>`) at `http://localhost:4300` on the server.
+- Only `127.0.0.1:4300` (web, for local health checks) is published on the host.
+  The DB and the tunnel have no host port.
+- The project has its own Cloudflare tunnel (`cloudflared` service). In Zero Trust
+  create a tunnel and add a public hostname `<your-domain>` with service type
+  `HTTP` and URL `web:8080` (the address inside `vectorizer_net`, not localhost).
 - Secrets live only in `/opt/vectorizer/.env` (chmod 600). Template:
   `deploy/env.production.example`.
 - The backend runs a single uvicorn process (the job worker is in-process);
@@ -74,3 +77,36 @@ curl -s -o /dev/null -w "docs: %{http_code}\n" http://127.0.0.1:4300/api/docs
 curl -s -o /dev/null -w "openapi: %{http_code}\n" http://127.0.0.1:4300/api/openapi.json
 curl -s -o /dev/null -w "health: %{http_code}\n" http://127.0.0.1:4300/api/health
 ```
+
+## Own Cloudflare tunnel
+
+The `cloudflared` service reads `TUNNEL_TOKEN` from `/opt/vectorizer/.env`. The
+compose file refuses to run without it, so **write the token before pulling a
+version that contains the `cloudflared` service** (`git fetch/reset`), never after.
+The backend container gets the variable blanked, so it never sees the token.
+
+On the server (log in first, then run the lines one by one; the token is typed
+silently):
+
+```bash
+ssh -i <key> root@<SERVER_IP>
+grep -c '^TUNNEL_TOKEN=' /opt/vectorizer/.env     # must print 0
+read -rsp 'Tunnel token: ' T; echo
+printf '
+TUNNEL_TOKEN=%s
+' "$T" >> /opt/vectorizer/.env
+unset T
+awk -F= '/^TUNNEL_TOKEN=/ {print "TUNNEL_TOKEN set, length " length($2)}' /opt/vectorizer/.env
+ls -l /opt/vectorizer/.env                       # -rw------- deploy deploy
+```
+
+Start only the tunnel, then check it:
+
+```bash
+docker compose -p vectorizer -f docker-compose.prod.yml up -d --no-build cloudflared
+docker logs --tail 20 vectorizer-cloudflared      # "Registered tunnel connection"
+docker inspect -f '{{.State.Health.Status}}' vectorizer-cloudflared
+```
+
+Remove it again: `docker compose -p vectorizer -f docker-compose.prod.yml rm -sf cloudflared`,
+delete the `TUNNEL_TOKEN` line from `.env` and delete the tunnel in Zero Trust.

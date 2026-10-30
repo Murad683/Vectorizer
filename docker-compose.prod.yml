@@ -2,7 +2,8 @@
 #
 # Isolated from the other projects on the host: own directory (/opt/vectorizer),
 # own network, own named volumes, own port, CPU/RAM limits. The only published
-# port is 127.0.0.1:4300 (a reverse proxy / tunnel forwards to it).
+# local port is 127.0.0.1:4300 (health checks); public traffic arrives through
+# this project's own Cloudflare tunnel (the cloudflared service below).
 #
 # Config: /opt/vectorizer/.env on the server (chmod 600, NOT committed). Template:
 # deploy/env.production.example. Compose reads it for ${...} interpolation and the
@@ -46,6 +47,9 @@ services:
       ENVIRONMENT: prod
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      # .env also holds the tunnel token; the backend never needs it, so blank
+      # it here (environment wins over env_file) instead of handing it over.
+      TUNNEL_TOKEN: ""
     volumes:
       - vectorizer_data:/app/data
     networks: [vectorizer_net]
@@ -88,6 +92,33 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+    logging: *logging
+
+  # This project's own Cloudflare tunnel (separate from any other tunnel on the
+  # host). It dials out to Cloudflare and reaches the site as http://web:8080
+  # inside vectorizer_net; no host port is published.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.5
+    container_name: vectorizer-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --protocol http2 --metrics 0.0.0.0:60123 run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in /opt/vectorizer/.env}
+    networks: [vectorizer_net]
+    depends_on:
+      web:
+        condition: service_healthy
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:60123", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     logging: *logging
 
 networks:

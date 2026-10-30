@@ -18,11 +18,13 @@ import logging
 import traceback
 from pathlib import Path
 
+from app.config import get_settings
 from app.core.assembly import assemble_docx, assemble_pptx
 from app.core.classifier import classify_elements
 from app.core.ingestion import get_extractor
 from app.core.queue.models import JobStatus
 from app.core.queue.store import JobStore
+from app.core.vision import VisionBudget, VisionBudgetExceededError, get_vision_provider
 from app.core.vision.cache import CachedVisionProvider
 
 logger = logging.getLogger(__name__)
@@ -31,8 +33,20 @@ _POLL_INTERVAL_SECONDS = 2.0
 _JOBS_OUTPUT_DIR = Path("data/jobs")
 
 
-def _process_job_sync(input_path: str, output_dir: Path) -> tuple[str, str]:
+_BUDGET_EXCEEDED_MESSAGE = (
+    "Bu iş üçün icazə verilən süni intellekt sorğularının sayı aşıldı. "
+    "Faylı bölüb daha kiçik hissələrlə yenidən yükləyin."
+)
+
+
+def _process_job_sync(
+    input_path: str, output_dir: Path, budget: VisionBudget | None = None
+) -> tuple[str, str]:
     """Run the full pipeline synchronously; return (docx_path, pptx_path).
+
+    ``budget`` caps the Gemini requests of the job (retries included) and is
+    shared with the caller, which reads ``budget.used`` afterwards. Raises
+    ``VisionBudgetExceededError`` when the ceiling is hit.
 
     This is the SAME pipeline as ``scripts/assemble_document.py`` —
     extract → classify → assemble, with vision called inside the
@@ -44,7 +58,9 @@ def _process_job_sync(input_path: str, output_dir: Path) -> tuple[str, str]:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    vision = CachedVisionProvider()
+    if budget is None:
+        budget = VisionBudget(limit=get_settings().max_vision_calls_per_job)
+    vision = CachedVisionProvider(factory=lambda: get_vision_provider(budget))
     document = assemble_docx(classified, vision_provider=vision)
     docx_path = output_dir / "output.docx"
     document.save(str(docx_path))
@@ -67,9 +83,15 @@ async def _worker_loop(store: JobStore) -> None:
         logger.info("Processing job %s (%s)", job.id, job.input_filename)
         output_dir = _JOBS_OUTPUT_DIR / str(job.id)
 
+        # Requests already spent by earlier attempts count against the ceiling,
+        # so a retry cannot start the allowance over.
+        budget = VisionBudget(
+            limit=get_settings().max_vision_calls_per_job, used=job.vision_calls
+        )
+
         try:
             docx_path, pptx_path = await asyncio.to_thread(
-                _process_job_sync, job.input_path, output_dir
+                _process_job_sync, job.input_path, output_dir, budget
             )
             store.update_job(
                 job.id,
@@ -77,8 +99,22 @@ async def _worker_loop(store: JobStore) -> None:
                 output_docx_path=docx_path,
                 output_pptx_path=pptx_path,
                 error_message=None,
+                vision_calls=budget.used,
             )
             logger.info("Job %s completed", job.id)
+        except VisionBudgetExceededError:
+            # Terminal: re-running would only spend more, so no retry.
+            store.update_job(
+                job.id,
+                status=JobStatus.FAILED,
+                error_message=_BUDGET_EXCEEDED_MESSAGE,
+                vision_calls=budget.used,
+            )
+            logger.error(
+                "Job %s stopped: Gemini request limit (%d) reached",
+                job.id,
+                budget.limit,
+            )
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             job = store.get_job(job.id)
@@ -89,6 +125,7 @@ async def _worker_loop(store: JobStore) -> None:
                     status=JobStatus.PENDING,
                     retry_count=job.retry_count + 1,
                     error_message=error_msg,
+                    vision_calls=budget.used,
                 )
                 logger.warning(
                     "Job %s failed (attempt %d/%d), will retry: %s",
@@ -102,6 +139,7 @@ async def _worker_loop(store: JobStore) -> None:
                     job.id,
                     status=JobStatus.FAILED,
                     error_message=error_msg,
+                    vision_calls=budget.used,
                 )
                 logger.error("Job %s failed permanently: %s", job.id, exc)
 

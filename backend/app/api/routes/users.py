@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from fastapi import APIRouter, Depends, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
@@ -75,7 +76,7 @@ async def create_user(
         user = store.create_user(
             user_id=uuid4(),
             email=body.email,
-            hashed_password=hash_password(body.password),
+            hashed_password=await run_in_threadpool(hash_password, body.password),
             role=body.role,
         )
     except psycopg.errors.UniqueViolation:

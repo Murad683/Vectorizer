@@ -1,6 +1,8 @@
 """Job management API: upload, poll status, download results."""
 
+import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -10,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from app.config import get_settings
 from app.core.auth.dependencies import get_current_user
 from app.core.auth.models import Role, User
+from app.core.ingestion import count_pdf_pages
 from app.core.queue.models import Job, JobStatus
 from app.core.queue.store import JobStore
 from app.models.errors import ErrorResponse
@@ -78,6 +81,41 @@ async def create_job(
             413,
             "file_too_large",
             f"File exceeds the {settings.max_upload_size_mb} MB upload limit.",
+            request,
+        )
+
+    if ext == ".pdf":
+        pages = await asyncio.to_thread(count_pdf_pages, contents)
+        if pages is not None and pages > settings.max_pages_per_file:
+            return _error(
+                400,
+                "too_many_pages",
+                f"PDF faylında {pages} səhifə var; icazə verilən maksimum "
+                f"{settings.max_pages_per_file} səhifədir. Faylı bölüb "
+                "yenidən yükləyin.",
+                request,
+            )
+
+    # No await between these checks and create_job below, so two uploads of
+    # the same user cannot both slip past the limits.
+    if store.count_active_jobs(current_user.id) >= settings.max_active_jobs_per_user:
+        return _error(
+            429,
+            "too_many_active_jobs",
+            f"Eyni anda ən çox {settings.max_active_jobs_per_user} iş "
+            "gözləyə və ya işlənə bilər. Əvvəlki işlərin bitməsini gözləyin.",
+            request,
+        )
+    day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+    if (
+        store.count_submissions_since(current_user.id, day_ago)
+        >= settings.max_jobs_per_user_per_day
+    ):
+        return _error(
+            429,
+            "daily_job_limit",
+            f"Son 24 saat ərzində ən çox {settings.max_jobs_per_user_per_day} "
+            "iş göndərə bilərsiniz. Limit dolub, sonra yenidən cəhd edin.",
             request,
         )
 

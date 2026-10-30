@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.core.auth.models import Role
 
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_dummy_hash: str | None = None
 
 _ALGORITHM = "HS256"
 ACCESS_TOKEN_LIFETIME = timedelta(minutes=30)
@@ -36,6 +37,18 @@ def hash_password(plain: str) -> str:
 def verify_password(plain: str, hashed: str) -> bool:
     """Check a plaintext password against its stored hash."""
     return _pwd_context.verify(plain, hashed)
+
+
+def verify_password_dummy(plain: str) -> None:
+    """Spend the cost of one bcrypt check without a real account.
+
+    Used for unknown emails so login time does not reveal whether an email
+    is registered.
+    """
+    global _dummy_hash
+    if _dummy_hash is None:
+        _dummy_hash = _pwd_context.hash(secrets.token_urlsafe(16))
+    _pwd_context.verify(plain, _dummy_hash)
 
 
 def create_access_token(user_id: UUID, role: Role, email: str) -> str:

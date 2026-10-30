@@ -18,6 +18,16 @@ _BLOCK_TYPE_TEXT = 0
 _BLOCK_TYPE_IMAGE = 1
 
 
+def count_pdf_pages(data: bytes) -> int | None:
+    """Return the page count of PDF ``data``, or ``None`` if it cannot be opened."""
+    try:
+        with pymupdf.open(stream=data, filetype="pdf") as doc:
+            return int(doc.page_count)
+    except Exception:  # noqa: BLE001 - a broken PDF fails later in the worker
+        logger.warning("Could not read the page count of an uploaded PDF")
+        return None
+
+
 class PdfExtractor(Extractor):
     """Extracts text blocks and embedded images from PDF files.
 

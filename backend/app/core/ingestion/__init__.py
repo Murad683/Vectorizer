@@ -5,7 +5,7 @@ from pathlib import Path
 from app.core.ingestion.base import Extractor
 from app.core.ingestion.docx_extractor import DocxExtractor
 from app.core.ingestion.image_extractor import ImageExtractor
-from app.core.ingestion.pdf_extractor import PdfExtractor
+from app.core.ingestion.pdf_extractor import PdfExtractor, count_pdf_pages
 
 _EXTRACTORS: dict[str, type[Extractor]] = {
     ".pdf": PdfExtractor,
@@ -36,5 +36,6 @@ __all__ = [
     "Extractor",
     "ImageExtractor",
     "PdfExtractor",
+    "count_pdf_pages",
     "get_extractor",
 ]

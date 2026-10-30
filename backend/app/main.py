@@ -60,6 +60,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.job_store = job_store
     app.state.user_store = user_store
     app.state.refresh_token_store = refresh_token_store
+    recovered = job_store.recover_interrupted_jobs()
+    if recovered:
+        logger.warning("Re-queued %d job(s) interrupted by a restart", recovered)
     worker_task = await start_worker(job_store)
     yield
     worker_task.cancel()

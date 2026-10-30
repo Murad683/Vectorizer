@@ -92,9 +92,7 @@ silently):
 ssh -i <key> root@<SERVER_IP>
 grep -c '^TUNNEL_TOKEN=' /opt/vectorizer/.env     # must print 0
 read -rsp 'Tunnel token: ' T; echo
-printf '
-TUNNEL_TOKEN=%s
-' "$T" >> /opt/vectorizer/.env
+printf '\nTUNNEL_TOKEN=%s\n' "$T" >> /opt/vectorizer/.env
 unset T
 awk -F= '/^TUNNEL_TOKEN=/ {print "TUNNEL_TOKEN set, length " length($2)}' /opt/vectorizer/.env
 ls -l /opt/vectorizer/.env                       # -rw------- deploy deploy

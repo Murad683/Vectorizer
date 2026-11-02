@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # Page mode: a photographed/scanned page is read as text + flowchart +
     # figures instead of one flowchart. False restores the old behaviour.
     page_mode_enabled: bool = True
+    # Ceiling on the length of ONE page answer (output + thinking tokens). Real
+    # answers use about 300-2 000; one in ~28 once ran away to 65 000 tokens
+    # ($0.10, two minutes). Do not touch temperature, see gemini_provider.
+    page_max_output_tokens: int = Field(default=12000, ge=1000)
     # Second line of defence against ghost text (ink-contrast check). Off: on
     # real pages the model leaves ghost text out by itself, while the check
     # dropped real lines when a box was a little off. Needs calibration on

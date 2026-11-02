@@ -282,7 +282,30 @@ class GeminiVisionProvider(VisionProvider):
             response_mime_type="application/json",
             response_schema=VisionAnalysis,
             http_options=genai_types.HttpOptions(timeout=_PAGE_REQUEST_TIMEOUT_MS),
+            max_output_tokens=settings.page_max_output_tokens,
         )
+
+    @staticmethod
+    def _note_usage(response: object, kind: str) -> None:
+        """Log the real token use of one request (numbers only, no content)."""
+        try:
+            usage = getattr(response, "usage_metadata", None)
+            if usage is not None:
+                logger.info(
+                    "gemini_usage kind=%s in=%s out=%s thoughts=%s",
+                    kind,
+                    getattr(usage, "prompt_token_count", None),
+                    getattr(usage, "candidates_token_count", None),
+                    getattr(usage, "thoughts_token_count", None),
+                )
+            for candidate in getattr(response, "candidates", None) or []:
+                if "MAX_TOKENS" in str(getattr(candidate, "finish_reason", "")):
+                    logger.warning(
+                        "Gemini answer cut at the output token ceiling (kind=%s)",
+                        kind,
+                    )
+        except Exception:  # noqa: BLE001 - logging must never break a request
+            logger.debug("Could not read token usage", exc_info=True)
 
     def _consume_budget(self) -> None:
         """Count one Gemini request against the job's ceiling, if there is one."""
@@ -320,6 +343,7 @@ class GeminiVisionProvider(VisionProvider):
         except Exception:  # noqa: BLE001 - keep the first answer
             logger.exception("Topology retry failed")
             return None, ""
+        self._note_usage(response, "topology_retry")
         raw = response.text or ""
         analysis = parse_vision_analysis(raw)
         if analysis is None or analysis.content_type != expect:
@@ -344,6 +368,7 @@ class GeminiVisionProvider(VisionProvider):
         except Exception:  # noqa: BLE001 - keep the first answer
             logger.exception("Repeat of the page request failed")
             return None, ""
+        self._note_usage(response, "page_repeat")
         raw = response.text or ""
         analysis = parse_vision_analysis(raw)
         if analysis is None or analysis.content_type != ContentType.PAGE:
@@ -377,6 +402,7 @@ class GeminiVisionProvider(VisionProvider):
         except Exception:  # noqa: BLE001 - keep the page as it is
             logger.exception("Flowchart rescue failed")
             return page
+        self._note_usage(response, "flowchart_rescue")
         analysis = parse_vision_analysis(response.text or "")
         if (
             analysis is None
@@ -561,6 +587,7 @@ class GeminiVisionProvider(VisionProvider):
                     contents=contents,  # type: ignore[arg-type]
                     config=config,
                 )
+                self._note_usage(response, "page" if page else "image")
                 raw_output = response.text or ""
                 analysis = parse_vision_analysis(raw_output)
                 if analysis is not None:

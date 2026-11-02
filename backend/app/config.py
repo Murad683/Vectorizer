@@ -33,6 +33,18 @@ class Settings(BaseSettings):
     max_jobs_per_user_per_day: int = Field(default=30, ge=1)
     # Hard ceiling on Gemini requests for one job, retries included.
     max_vision_calls_per_job: int = Field(default=25, ge=1)
+    # A PDF is a job of many pages, so its request ceiling grows with the page
+    # count: max(MAX_VISION_CALLS_PER_JOB, pages * PER_PAGE + EXTRA). Single
+    # images and DOCX files keep MAX_VISION_CALLS_PER_JOB.
+    vision_calls_per_page: int = Field(default=2, ge=1)
+    vision_calls_extra: int = Field(default=5, ge=0)
+    # PDF page types: a page whose biggest image covers this share of the page is
+    # a scan (even with a hidden OCR text layer); a page with fewer text characters
+    # than the minimum and an image or drawing is a scan too. Scans are rendered
+    # at this resolution and read as a whole page by the vision model.
+    pdf_scan_coverage: float = Field(default=0.80, gt=0, le=1)
+    pdf_min_text_chars: int = Field(default=20, ge=1)
+    pdf_scan_dpi: int = Field(default=150, ge=72, le=300)
     # Daily cleanup of uploaded INPUT files (python -m app.cleanup_inputs).
     input_retention_hours: int = Field(default=24, ge=1)
     input_cleanup_max_per_run: int = Field(default=100, ge=1)

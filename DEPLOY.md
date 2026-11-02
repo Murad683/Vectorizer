@@ -291,3 +291,21 @@ docker exec vectorizer-backend python -m app.usage_report --days 7
 1.50) only affect this estimate; change them in `.env` when the model changes. Every request
 also logs `gemini_usage kind=... in=... out=... thoughts=...` (lost when the container is
 recreated; the table is the permanent record).
+
+## Scanned PDFs
+
+Each PDF page is sorted before anything is sent to Gemini:
+
+- **Scan** (one image covers at least `PDF_SCAN_COVERAGE`, default 0.80, even with a hidden OCR
+  text layer; or fewer than `PDF_MIN_TEXT_CHARS` characters (20) plus an image or drawing): the
+  page is rendered at `PDF_SCAN_DPI` (150) and read as a whole page (text, flowchart, figures),
+  one request per page. In the DOCX it starts on its own page, in the PPTX on its own slide.
+- **Blank** (no text, image or drawing): skipped, no request, logged as `Page N is blank`.
+- **Text** (real text layer): copied directly, no request. The reading order is checked: one
+  column, two clear columns (read column after column) are handled; a layout that is not clear
+  (three columns, side notes) is read as a scan instead, logged as `layout not clear`.
+
+The per-job request ceiling of a PDF is `max(MAX_VISION_CALLS_PER_JOB, pages * VISION_CALLS_PER_PAGE
++ VISION_CALLS_EXTRA)` (defaults 25, 2, 5: 50 pages -> 105). Images and DOCX keep
+`MAX_VISION_CALLS_PER_JOB`. `PAGE_MODE_ENABLED=false` makes scans fall back to the old
+one-image-one-flowchart reading. Check what a PDF cost with `python -m app.usage_report`.

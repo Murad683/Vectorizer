@@ -54,6 +54,26 @@ def _count_input_pages(path: Path) -> int | None:
     return None
 
 
+def _vision_limit(input_path: str) -> int:
+    """Gemini request ceiling for one job.
+
+    A PDF costs one request per scanned page (and a retry now and then), so
+    its ceiling grows with the page count; everything else keeps the flat
+    ``MAX_VISION_CALLS_PER_JOB``.
+    """
+    settings = get_settings()
+    limit = settings.max_vision_calls_per_job
+    path = Path(input_path)
+    if path.suffix.lower() == ".pdf":
+        pages = _count_input_pages(path)
+        if pages:
+            limit = max(
+                limit,
+                pages * settings.vision_calls_per_page + settings.vision_calls_extra,
+            )
+    return limit
+
+
 def _record_usage(
     store: JobStore,
     job: Job,
@@ -108,7 +128,7 @@ def _process_job_sync(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if budget is None:
-        budget = VisionBudget(limit=get_settings().max_vision_calls_per_job)
+        budget = VisionBudget(limit=_vision_limit(input_path))
     vision = CachedVisionProvider(
         factory=lambda: vision_pkg.get_vision_provider(budget)
     )
@@ -137,7 +157,7 @@ async def _worker_loop(store: JobStore) -> None:
         # Requests already spent by earlier attempts count against the ceiling,
         # so a retry cannot start the allowance over.
         budget = VisionBudget(
-            limit=get_settings().max_vision_calls_per_job, used=job.vision_calls
+            limit=_vision_limit(job.input_path), used=job.vision_calls
         )
 
         calls_before = budget.used

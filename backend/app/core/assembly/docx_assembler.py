@@ -89,8 +89,16 @@ def assemble_docx(
     _setup_page(document)
     provider: VisionProvider | None = vision_provider
     last_text: str | None = None
+    started = False
+    after_scan = False
 
     for item in classified:
+        # A scanned page keeps its own page: it starts on a fresh one, and what
+        # follows it does too. Text documents flow as before.
+        is_scan = bool(item.element.metadata.get("whole_page"))
+        if started and (is_scan or after_scan):
+            document.add_page_break()  # type: ignore[no-untyped-call]
+        started, after_scan = True, is_scan
         if item.element_type == ElementType.TEXT:
             _add_text(document, item)
             last_text = str(item.element.raw_content)

@@ -99,8 +99,15 @@ def assemble_pptx(
     cursor = _SlideCursor(prs)
     provider: VisionProvider | None = vision_provider
     last_text: str | None = None
+    started = False
+    after_scan = False
 
     for item in classified:
+        # A scanned page gets its own slide(s); what follows it starts a new one.
+        is_scan = bool(item.element.metadata.get("whole_page"))
+        if started and (is_scan or after_scan):
+            cursor.slide = None
+        started, after_scan = True, is_scan
         if item.element_type == ElementType.TEXT:
             _add_text(cursor, item)
             last_text = str(item.element.raw_content)

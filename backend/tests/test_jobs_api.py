@@ -425,6 +425,56 @@ class TestJobDeletion:
         assert resp.status_code == 204
         assert not docx_path.exists()
 
+    def test_delete_removes_the_emptied_output_directory(
+        self, client: TestClient, sample_bytes: bytes, tmp_path: Path
+    ) -> None:
+        from uuid import UUID
+
+        import docx
+
+        token = _login(client)
+        job_id = client.post(
+            "/jobs",
+            files={"file": ("test.docx", sample_bytes, "application/octet-stream")},
+            headers=_auth(token),
+        ).json()["job_id"]
+        out_dir = tmp_path / job_id  # the worker names the directory after the job
+        out_dir.mkdir()
+        docx_path = out_dir / "output.docx"
+        docx.Document().save(str(docx_path))
+        client.app.state.job_store.update_job(  # type: ignore[union-attr]
+            UUID(job_id), status=JobStatus.COMPLETED, output_docx_path=str(docx_path)
+        )
+
+        assert client.delete(f"/jobs/{job_id}", headers=_auth(token)).status_code == 204
+        assert not out_dir.exists()
+
+    def test_delete_keeps_a_directory_that_still_has_other_files(
+        self, client: TestClient, sample_bytes: bytes, tmp_path: Path
+    ) -> None:
+        from uuid import UUID
+
+        import docx
+
+        token = _login(client)
+        job_id = client.post(
+            "/jobs",
+            files={"file": ("test.docx", sample_bytes, "application/octet-stream")},
+            headers=_auth(token),
+        ).json()["job_id"]
+        out_dir = tmp_path / job_id
+        out_dir.mkdir()
+        docx_path = out_dir / "output.docx"
+        docx.Document().save(str(docx_path))
+        (out_dir / "keep.txt").write_text("not ours")
+        client.app.state.job_store.update_job(  # type: ignore[union-attr]
+            UUID(job_id), status=JobStatus.COMPLETED, output_docx_path=str(docx_path)
+        )
+
+        assert client.delete(f"/jobs/{job_id}", headers=_auth(token)).status_code == 204
+        assert not docx_path.exists()
+        assert (out_dir / "keep.txt").read_text() == "not ours"
+
     def test_delete_nonexistent_job_404(self, client: TestClient) -> None:
         token = _login(client)
         resp = client.delete(

@@ -424,6 +424,8 @@ class TestPromptAndProvider:
         self, provider: GeminiVisionProvider
     ) -> None:
         assert provider._page_config.http_options.timeout == 120_000
+        assert provider._page_config.temperature == 0.0
+        assert provider._config.temperature is None  # diagrams: unchanged
         assert provider._config.http_options.timeout == 60_000
 
     def test_page_costs_one_request_when_the_chart_is_complete(

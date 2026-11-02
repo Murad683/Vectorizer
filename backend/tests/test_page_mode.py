@@ -429,6 +429,46 @@ class TestPromptAndProvider:
         assert provider._config.temperature is None
         assert provider._config.http_options.timeout == 60_000
 
+    def test_a_page_answer_has_a_length_ceiling(
+        self, provider: GeminiVisionProvider
+    ) -> None:
+        assert provider._page_config.max_output_tokens == 12000
+
+    def test_an_answer_cut_at_the_ceiling_is_asked_again(
+        self, provider: GeminiVisionProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "app.core.vision.gemini_provider.time.sleep", lambda _: None
+        )
+        cut = MagicMock()
+        cut.text = '{"content_type": "page", "page": {"blocks": [{"kind": "te'
+        provider._client.models.generate_content.side_effect = [
+            cut,
+            self._reply(
+                self._page_payload([self._text_block("Salam", [80, 100, 120, 700])])
+            ),
+        ]
+        result = provider.analyze_diagram(_PAGE_IMAGE, page=True)
+        assert provider._client.models.generate_content.call_count == 2
+        assert result.page is not None and result.page.blocks[0].text == "Salam"
+
+    def test_token_use_is_logged_without_content(
+        self, provider: GeminiVisionProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        reply = self._reply(
+            self._page_payload([self._text_block("Gizli mətn", [80, 100, 120, 700])])
+        )
+        reply.usage_metadata.prompt_token_count = 4200
+        reply.usage_metadata.candidates_token_count = 900
+        reply.usage_metadata.thoughts_token_count = None
+        provider._client.models.generate_content.return_value = reply
+        with caplog.at_level("INFO", logger="app.core.vision.gemini_provider"):
+            provider.analyze_diagram(_PAGE_IMAGE, page=True)
+        lines = [
+            r.getMessage() for r in caplog.records if "gemini_usage" in r.getMessage()
+        ]
+        assert lines == ["gemini_usage kind=page in=4200 out=900 thoughts=None"]
+
     def test_page_costs_one_request_when_the_chart_is_complete(
         self, provider: GeminiVisionProvider
     ) -> None:

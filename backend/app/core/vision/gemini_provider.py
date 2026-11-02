@@ -26,6 +26,8 @@ from app.core.vision.postprocess import (
     topology_problems,
 )
 from app.models.document import ContentType, VisionAnalysis, VisionResult
+from app.models.page import BlockKind, PageAnalysis, PageBlock, TextStyle
+from app.models.text_content import TextRun
 
 __all__ = [
     "GeminiVisionProvider",
@@ -48,6 +50,15 @@ marks are only for identification; read the text from the FIRST image.
 _MAX_RETRIES = 2
 _RETRY_DELAY_SECONDS = 2.0
 _REQUEST_TIMEOUT_MS = 60_000
+# A dense page answers with far more text than one diagram.
+_PAGE_REQUEST_TIMEOUT_MS = 120_000
+# Page mode sometimes calls a flowchart a "figure" (seen live: a plain
+# flowchart photo came back as a figure in 2 of 3 runs). When the page answer
+# has no flowchart but the local detector found this many symbols, the old
+# single-diagram prompt is asked once for the whole image.
+_RESCUE_MIN_SHAPES = 4
+_RESCUE_MIN_LABELLED_NODES = 3
+_RESCUE_OVERLAP = 0.4
 
 _TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 
@@ -237,6 +248,16 @@ def _is_transient(exc: Exception) -> bool:
     return isinstance(exc, ConnectionError | TimeoutError)
 
 
+def _overlap(a: list[int], b: list[int]) -> float:
+    """Part of box ``b`` inside box ``a`` (both as ymin, xmin, ymax, xmax)."""
+    ymin, xmin = max(a[0], b[0]), max(a[1], b[1])
+    ymax, xmax = min(a[2], b[2]), min(a[3], b[3])
+    if ymax <= ymin or xmax <= xmin:
+        return 0.0
+    area = (b[2] - b[0]) * (b[3] - b[1])
+    return (ymax - ymin) * (xmax - xmin) / area if area > 0 else 0.0
+
+
 class GeminiVisionProvider(VisionProvider):
     """Diagram analysis backed by the Google Gemini API (JSON mode)."""
 
@@ -254,6 +275,11 @@ class GeminiVisionProvider(VisionProvider):
             response_schema=VisionAnalysis,
             http_options=genai_types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
         )
+        self._page_config = genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=VisionAnalysis,
+            http_options=genai_types.HttpOptions(timeout=_PAGE_REQUEST_TIMEOUT_MS),
+        )
 
     def _consume_budget(self) -> None:
         """Count one Gemini request against the job's ceiling, if there is one."""
@@ -265,6 +291,7 @@ class GeminiVisionProvider(VisionProvider):
         contents: list[str | genai_types.Part],
         problems: list[str],
         expect: ContentType = ContentType.DIAGRAM,
+        config: genai_types.GenerateContentConfig | None = None,
     ) -> tuple[VisionAnalysis | None, str]:
         """Single corrective call listing what was structurally wrong.
 
@@ -283,7 +310,7 @@ class GeminiVisionProvider(VisionProvider):
             response = self._client.models.generate_content(
                 model=self._model_name,
                 contents=[*contents[:-1], str(contents[-1]) + fix],  # type: ignore[arg-type]
-                config=self._config,
+                config=config or self._config,
             )
         except VisionBudgetExceededError:
             raise
@@ -296,6 +323,122 @@ class GeminiVisionProvider(VisionProvider):
             return None, raw
         return analysis, raw
 
+    def _ask_again(
+        self,
+        contents: list[str | genai_types.Part],
+        config: genai_types.GenerateContentConfig,
+    ) -> tuple[VisionAnalysis | None, str]:
+        """Repeat the same request once (an answer without any text block)."""
+        try:
+            self._consume_budget()
+            response = self._client.models.generate_content(
+                model=self._model_name,
+                contents=contents,  # type: ignore[arg-type]
+                config=config,
+            )
+        except VisionBudgetExceededError:
+            raise
+        except Exception:  # noqa: BLE001 - keep the first answer
+            logger.exception("Repeat of the page request failed")
+            return None, ""
+        raw = response.text or ""
+        analysis = parse_vision_analysis(raw)
+        if analysis is None or analysis.content_type != ContentType.PAGE:
+            return None, raw
+        return analysis, raw
+
+    def _rescue_flowchart(
+        self,
+        page: PageAnalysis,
+        contents: list[str | genai_types.Part],
+        marked: bool,
+    ) -> PageAnalysis:
+        """Ask the proven single-diagram prompt for the whole image.
+
+        Used only when the page answer has no flowchart block although the
+        detector saw several symbols. The diagram replaces the figure block it
+        covers (or is inserted by position); a caption the model put in the
+        diagram's ``title`` becomes a text block. Anything doubtful leaves the
+        page as it was.
+        """
+        prompt = _PROMPT + (_MARKS_PROMPT if marked else "")
+        try:
+            self._consume_budget()
+            response = self._client.models.generate_content(
+                model=self._model_name,
+                contents=[*contents[:-1], prompt],  # type: ignore[arg-type]
+                config=self._config,
+            )
+        except VisionBudgetExceededError:
+            raise
+        except Exception:  # noqa: BLE001 - keep the page as it is
+            logger.exception("Flowchart rescue failed")
+            return page
+        analysis = parse_vision_analysis(response.text or "")
+        if (
+            analysis is None
+            or analysis.content_type != ContentType.DIAGRAM
+            or analysis.diagram is None
+        ):
+            return page
+        graph = analysis.diagram
+        labelled = sum(1 for n in graph.nodes if n.text.strip())
+        if (
+            labelled < _RESCUE_MIN_LABELLED_NODES
+            or len(graph.edges) < 2
+            or len(topology_problems(graph)) > 1
+        ):
+            return page
+        boxes = [n.box_2d for n in graph.nodes if n.box_2d and len(n.box_2d) == 4]
+        union = (
+            [
+                min(b[0] for b in boxes),
+                min(b[1] for b in boxes),
+                max(b[2] for b in boxes),
+                max(b[3] for b in boxes),
+            ]
+            if boxes
+            else None
+        )
+        title, title_below = graph.title, graph.title_below
+        graph.title, graph.title_below = None, False
+        chart = PageBlock(kind=BlockKind.FLOWCHART, diagram=graph, box_2d=union)
+
+        blocks = list(page.blocks)
+        index = len(blocks)
+        if union is not None:
+            index = next(
+                (
+                    i
+                    for i, b in enumerate(blocks)
+                    if b.box_2d and b.box_2d[0] > union[0]
+                ),
+                len(blocks),
+            )
+            covered = [
+                i
+                for i, b in enumerate(blocks)
+                if b.kind == BlockKind.FIGURE
+                and b.box_2d is not None
+                and _overlap(b.box_2d, union) >= _RESCUE_OVERLAP
+            ]
+            if covered:
+                index = covered[0]
+                blocks = [b for i, b in enumerate(blocks) if i not in covered]
+        blocks.insert(index, chart)
+        if title and not any(
+            " ".join(title.split()) == " ".join(b.text.split())
+            for b in blocks
+            if b.kind == BlockKind.TEXT
+        ):
+            caption = PageBlock(
+                kind=BlockKind.TEXT,
+                style=TextStyle.PARAGRAPH,
+                runs=[TextRun(text=title)],
+            )
+            blocks.insert(index + 1 if title_below else index, caption)
+        return PageAnalysis(blocks=blocks)
+
     def _finish_page(
         self,
         analysis: VisionAnalysis,
@@ -304,6 +447,7 @@ class GeminiVisionProvider(VisionProvider):
         detection: Detection | None,
         marked: bool,
         contents: list[str | genai_types.Part],
+        config: genai_types.GenerateContentConfig,
         dump: DebugDump,
         meta: dict[str, object],
     ) -> VisionResult:
@@ -316,7 +460,7 @@ class GeminiVisionProvider(VisionProvider):
             # Same single corrective re-ask as for a lone diagram.
             logger.warning("Page flowchart incomplete: %s", "; ".join(problems))
             retry, retry_raw = self._retry_topology(
-                contents, problems, expect=ContentType.PAGE
+                contents, problems, expect=ContentType.PAGE, config=config
             )
             dump.text("retry.json", retry_raw)
             kept = (
@@ -327,6 +471,26 @@ class GeminiVisionProvider(VisionProvider):
             meta["retry_kept"] = kept
             if kept and retry is not None and retry.page is not None:
                 page, raw_output = retry.page, retry_raw
+        readable = (BlockKind.TEXT, BlockKind.FLOWCHART)
+        if not any(b.kind in readable for b in page.blocks):
+            # An answer with only figures/tables and neither text nor a
+            # flowchart is almost always incomplete (seen live on a dense
+            # page); one repeat is cheap.
+            again, again_raw = self._ask_again(contents, config)
+            if (
+                again is not None
+                and again.page is not None
+                and any(b.kind in readable for b in again.page.blocks)
+            ):
+                page, raw_output = again.page, again_raw
+                meta["empty_text_repeat"] = True
+        if (
+            not any(b.kind == BlockKind.FLOWCHART for b in page.blocks)
+            and detection is not None
+            and len(detection.shapes) >= _RESCUE_MIN_SHAPES
+        ):
+            page = self._rescue_flowchart(page, contents, marked)
+            meta["rescue_tried"] = True
         if get_settings().ghost_filter_enabled:
             page = filter_page(page, image)
         for block in page.blocks:
@@ -375,6 +539,7 @@ class GeminiVisionProvider(VisionProvider):
                 genai_types.Part.from_bytes(data=marked, mime_type="image/png")
             )
         contents.append(prompt)
+        config = self._page_config if page else self._config
         dump.detection(detection)
         if marked is not None:
             dump.binary("marked.png", marked)
@@ -391,7 +556,7 @@ class GeminiVisionProvider(VisionProvider):
                     # mypy: the SDK's contents union spells Image as
                     # PIL.Image.Image; our narrower list is fine at runtime.
                     contents=contents,  # type: ignore[arg-type]
-                    config=self._config,
+                    config=config,
                 )
                 raw_output = response.text or ""
                 analysis = parse_vision_analysis(raw_output)
@@ -449,6 +614,7 @@ class GeminiVisionProvider(VisionProvider):
                 detection,
                 marked is not None,
                 contents,
+                config,
                 dump,
                 meta,
             )

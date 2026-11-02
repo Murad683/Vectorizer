@@ -237,8 +237,10 @@ class TestPromptAndProvider:
         assert "READING ORDER" not in prompt
 
     def test_faint_text_in_the_answer_is_filtered_out(
-        self, provider: GeminiVisionProvider
+        self, provider: GeminiVisionProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setenv("GHOST_FILTER_ENABLED", "true")
+        get_settings.cache_clear()
         provider._client.models.generate_content.return_value = self._reply(
             self._page_payload(
                 [
@@ -321,6 +323,25 @@ class TestParseAndClean:
         cleaned = clean_page(page)
         assert [b.kind for b in cleaned.blocks] == [BlockKind.FIGURE, BlockKind.TEXT]
         assert cleaned.blocks[0].box_2d == [100, 100, 500, 500]  # was the chart
+
+    def test_labels_inside_a_figure_are_not_repeated_as_text(self) -> None:
+        page = PageAnalysis(
+            blocks=[
+                PageBlock(kind=BlockKind.FIGURE, box_2d=[100, 100, 600, 900]),
+                _text(TextStyle.OPTION, "A)", (150, 500, 250, 560)),
+                # long text that merely overlaps the figure's box stays
+                _text(TextStyle.PARAGRAPH, "x" * 60, (150, 500, 250, 560)),
+            ]
+        )
+        kinds = [b.kind for b in clean_page(page).blocks]
+        assert kinds == [BlockKind.FIGURE, BlockKind.TEXT]
+        assert len(clean_page(page).blocks[1].text) == 60
+
+    def test_the_filter_is_off_by_default(self) -> None:
+        assert get_settings().ghost_filter_enabled is False
+
+    def test_page_prompt_says_a_flowchart_is_never_a_figure(self) -> None:
+        assert "NEVER a figure" in gemini_provider._PAGE_PROMPT
 
     def test_boxes_are_clamped(self) -> None:
         block = PageBlock(kind=BlockKind.FIGURE, box_2d=[-20, 10, 1200, 500])

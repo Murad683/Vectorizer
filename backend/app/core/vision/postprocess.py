@@ -113,6 +113,22 @@ def _valid_box(box: list[int] | None) -> list[int] | None:
     return [ymin, xmin, ymax, xmax]
 
 
+_LABEL_MAX_CHARS = 25  # short text inside a figure is part of the picture
+_INSIDE_FRACTION = 0.8
+
+
+def _inside(inner: list[int], outer: list[int]) -> bool:
+    """True when at least ``_INSIDE_FRACTION`` of ``inner`` lies inside ``outer``."""
+    ymin = max(inner[0], outer[0])
+    xmin = max(inner[1], outer[1])
+    ymax = min(inner[2], outer[2])
+    xmax = min(inner[3], outer[3])
+    if ymax <= ymin or xmax <= xmin:
+        return False
+    area = (inner[2] - inner[0]) * (inner[3] - inner[1])
+    return (ymax - ymin) * (xmax - xmin) >= _INSIDE_FRACTION * area
+
+
 def clean_page(page: PageAnalysis) -> PageAnalysis:
     """Drop blocks that carry nothing usable; keep reading order.
 
@@ -143,6 +159,19 @@ def clean_page(page: PageAnalysis) -> PageAnalysis:
                 kept.append(block)
         elif block.box_2d is not None:  # FIGURE
             kept.append(block)
+    # Option letters and labels the model also listed as text although they sit
+    # inside a figure's box would appear twice: once in the picture, once as text.
+    figures = [b.box_2d for b in kept if b.kind == BlockKind.FIGURE and b.box_2d]
+    kept = [
+        b
+        for b in kept
+        if not (
+            b.kind == BlockKind.TEXT
+            and b.box_2d is not None
+            and len(b.text.strip()) <= _LABEL_MAX_CHARS
+            and any(_inside(b.box_2d, figure) for figure in figures)
+        )
+    ]
     return PageAnalysis(blocks=kept)
 
 

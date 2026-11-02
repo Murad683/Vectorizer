@@ -424,8 +424,9 @@ class TestPromptAndProvider:
         self, provider: GeminiVisionProvider
     ) -> None:
         assert provider._page_config.http_options.timeout == 120_000
-        assert provider._page_config.temperature == 0.0
-        assert provider._config.temperature is None  # diagrams: unchanged
+        # An explicit temperature made live requests hit the deadline.
+        assert provider._page_config.temperature is None
+        assert provider._config.temperature is None
         assert provider._config.http_options.timeout == 60_000
 
     def test_page_costs_one_request_when_the_chart_is_complete(
@@ -478,6 +479,16 @@ class TestParseAndClean:
         kinds = [b.kind for b in clean_page(page).blocks]
         assert kinds == [BlockKind.FIGURE, BlockKind.TEXT]
         assert len(clean_page(page).blocks[1].text) == 60
+
+    def test_a_lone_page_number_is_dropped_but_a_question_is_not(self) -> None:
+        page = PageAnalysis(
+            blocks=[
+                _text(TextStyle.HEADING, "8", (10, 10, 20, 20)),
+                _text(TextStyle.HEADING, "12.", (10, 10, 20, 20)),
+                _text(TextStyle.HEADING, "8. Sual mətni?", (10, 10, 20, 20)),
+            ]
+        )
+        assert [b.text for b in clean_page(page).blocks] == ["8. Sual mətni?"]
 
     def test_the_filter_is_off_by_default(self) -> None:
         assert get_settings().ghost_filter_enabled is False

@@ -29,6 +29,7 @@ case "$1" in
   rev-parse) cat "$STUB_STATE/head" ;;
   reset)
     echo "$3" >"$STUB_STATE/head"
+    echo x >"$STUB_STATE/written-by-reset"
     # going back to the old commit brings the old (healthy) version back
     [ "$3" = "2222222222222222222222222222222222222222" ] && echo ok >"$STUB_STATE/health"
     ;;
@@ -119,6 +120,9 @@ else
 fi
 logged "docker tag vectorizer-backend:latest vectorizer-backend:rollback" && ok "rollback image tagged" || bad "no rollback tag"
 logged "git reset --hard $NEW" && ok "reset to the new commit" || bad "no reset"
+if [ "$(uname -o)" != "Msys" ]; then
+  [ "$(stat -c%a "$STUB_STATE/written-by-reset")" = 644 ] && ok "files written by git stay readable (644)" || bad "git files mode"
+fi
 logged "up -d --build" && ok "built and started" || bad "no build"
 [ "$(cat "$APP/backups/.prev_sha")" = "$OLD" ] && ok "previous commit recorded" || bad "prev_sha"
 [ "$(cat "$APP/backups/.last_ok_sha")" = "$NEW" ] && ok "last good commit recorded" || bad "last_ok_sha"

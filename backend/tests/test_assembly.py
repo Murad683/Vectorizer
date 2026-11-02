@@ -38,7 +38,9 @@ def classified(sample_docx: Path) -> list[ClassifiedElement]:
 def mock_vision(flowchart_graph: DiagramGraph, flowchart_png_bytes: bytes) -> MagicMock:
     """Vision that solves the real flowchart and fails on other images."""
 
-    def analyze(image: bytes, context: str | None = None) -> VisionResult:
+    def analyze(
+        image: bytes, context: str | None = None, page: bool = False
+    ) -> VisionResult:
         if image == flowchart_png_bytes:
             return VisionResult(
                 content_type=ContentType.DIAGRAM, diagram_graph=flowchart_graph
@@ -92,7 +94,9 @@ def mock_vision_with_text(
 ) -> MagicMock:
     """Vision that solves the flowchart AND extracts q87 as text content."""
 
-    def analyze(image: bytes, context: str | None = None) -> VisionResult:
+    def analyze(
+        image: bytes, context: str | None = None, page: bool = False
+    ) -> VisionResult:
         if image == flowchart_png_bytes:
             return VisionResult(
                 content_type=ContentType.DIAGRAM, diagram_graph=flowchart_graph
@@ -117,7 +121,9 @@ def mock_vision_with_title(flowchart_graph: DiagramGraph) -> MagicMock:
         update={"title": "Blok-sxem nəyi hesablayır?"}
     )
 
-    def analyze(image: bytes, context: str | None = None) -> VisionResult:
+    def analyze(
+        image: bytes, context: str | None = None, page: bool = False
+    ) -> VisionResult:
         return VisionResult(
             content_type=ContentType.DIAGRAM, diagram_graph=graph_with_title
         )
@@ -377,7 +383,9 @@ class TestTextContentAssembly:
     ) -> None:
         """A single-list (non-matching) text_content is not usable → image."""
 
-        def analyze(image: bytes, context: str | None = None) -> VisionResult:
+        def analyze(
+            image: bytes, context: str | None = None, page: bool = False
+        ) -> VisionResult:
             if image == flowchart_png_bytes:
                 return VisionResult(
                     content_type=ContentType.DIAGRAM, diagram_graph=flowchart_graph

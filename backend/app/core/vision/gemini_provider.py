@@ -285,19 +285,26 @@ class GeminiVisionProvider(VisionProvider):
             max_output_tokens=settings.page_max_output_tokens,
         )
 
-    @staticmethod
-    def _note_usage(response: object, kind: str) -> None:
-        """Log the real token use of one request (numbers only, no content)."""
+    def _note_usage(self, response: object, kind: str) -> None:
+        """Log and count the real token use of one request (numbers only)."""
         try:
             usage = getattr(response, "usage_metadata", None)
             if usage is not None:
+                tokens = [
+                    getattr(usage, name, None)
+                    for name in (
+                        "prompt_token_count",
+                        "candidates_token_count",
+                        "thoughts_token_count",
+                    )
+                ]
                 logger.info(
-                    "gemini_usage kind=%s in=%s out=%s thoughts=%s",
-                    kind,
-                    getattr(usage, "prompt_token_count", None),
-                    getattr(usage, "candidates_token_count", None),
-                    getattr(usage, "thoughts_token_count", None),
+                    "gemini_usage kind=%s in=%s out=%s thoughts=%s", kind, *tokens
                 )
+                if self._budget is not None:
+                    self._budget.add_usage(
+                        *(t if isinstance(t, int) else None for t in tokens)
+                    )
             for candidate in getattr(response, "candidates", None) or []:
                 if "MAX_TOKENS" in str(getattr(candidate, "finish_reason", "")):
                     logger.warning(

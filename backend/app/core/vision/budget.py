@@ -15,11 +15,16 @@ class VisionBudget:
 
     ``used`` can start above zero: the worker restores the count a job has
     already spent in earlier attempts, so a retry cannot reset the ceiling.
+    The token counters only add up what this attempt used; they feed the
+    usage log and never limit anything.
     """
 
     def __init__(self, limit: int, used: int = 0) -> None:
         self.limit = limit
         self.used = used
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.thought_tokens = 0
 
     def consume(self) -> None:
         """Reserve one request; raise ``VisionBudgetExceededError`` if none is left."""
@@ -28,3 +33,14 @@ class VisionBudget:
                 f"Gemini request limit reached ({self.limit} per job)."
             )
         self.used += 1
+
+    def add_usage(
+        self,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        thought_tokens: int | None,
+    ) -> None:
+        """Add the token numbers of one answer (``None`` counts as zero)."""
+        self.input_tokens += input_tokens or 0
+        self.output_tokens += output_tokens or 0
+        self.thought_tokens += thought_tokens or 0

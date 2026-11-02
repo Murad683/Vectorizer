@@ -341,7 +341,7 @@ class TestGhostFilter:
         hand = ink_ratio(gray, _box((100, 900, 600, 940)))
         assert printed > 0.7 and ghost < 0.2 and hand < 0.4
 
-    def test_printed_kept_ghost_handwriting_and_cutoff_dropped(self) -> None:
+    def test_printed_kept_ghost_and_cutoff_dropped(self) -> None:
         page = PageAnalysis(
             blocks=[
                 _text(
@@ -350,7 +350,6 @@ class TestGhostFilter:
                     (100, 100, 700, 140),
                 ),
                 _text(TextStyle.PARAGRAPH, "m*2 = 2m*2 aa", (500, 700, 800, 740)),
-                _text(TextStyle.PARAGRAPH, "45 + 20 = 65 ok", (100, 900, 600, 940)),
                 _text(TextStyle.PARAGRAPH, "yarım sətir", (0, 100, 120, 140)),
                 PageBlock(kind=BlockKind.FIGURE, box_2d=_box((500, 700, 800, 740))),
             ]
@@ -358,6 +357,15 @@ class TestGhostFilter:
         kept = filter_page(page, _PAGE_IMAGE)
         assert [b.kind for b in kept.blocks] == [BlockKind.TEXT, BlockKind.FIGURE]
         assert kept.blocks[0].text == "Sual 1. Birinci sualin metni?"
+
+    def test_box_on_blank_paper_is_kept_not_taken_for_ghost(self) -> None:
+        blank = _text(TextStyle.PARAGRAPH, "9. Sual", (100, 400, 700, 440))
+        assert len(filter_page(PageAnalysis(blocks=[blank]), _PAGE_IMAGE).blocks) == 1
+
+    def test_a_slightly_misplaced_box_still_finds_its_text(self) -> None:
+        # printed line at y 100-140; the box sits ~40 px above it
+        shifted = _text(TextStyle.HEADING, "Sual 1.", (100, 55, 700, 95))
+        assert len(filter_page(PageAnalysis(blocks=[shifted]), _PAGE_IMAGE).blocks) == 1
 
     def test_long_text_touching_the_edge_is_kept(self) -> None:
         long_text = "Bu uzun cümlə şəklin kənarına toxunur, amma tam çap mətnidir. " * 2
@@ -392,6 +400,16 @@ class TestGrouping:
         )
         unit = next(i for i in group_blocks(blocks) if isinstance(i, FlowUnit))
         assert [b.text for b in unit.after] == ["B) a ≤ n, a := 0"]
+
+    def test_a_caption_below_the_chart_belongs_to_it(self) -> None:
+        graph, _ = run_fixture("sum_loop")
+        blocks = [
+            PageBlock(kind=BlockKind.FLOWCHART, diagram=graph, box_2d=[1, 1, 9, 9]),
+            _text(TextStyle.PARAGRAPH, "Sxem 3. Cəmin hesablanması.", (1, 1, 2, 2)),
+        ]
+        unit = group_blocks(blocks)[0]
+        assert isinstance(unit, FlowUnit)
+        assert [b.text for b in unit.after] == ["Sxem 3. Cəmin hesablanması."]
 
     def test_chart_without_a_question_line_has_no_before(self) -> None:
         graph, _ = run_fixture("sum_loop")
@@ -428,6 +446,26 @@ class TestDocx:
                     order.append(text)
         assert order.index("Sual 2. Ikinci sual haqqinda?") + 1 == order.index("CHART")
         assert order.index("CHART") + 1 == order.index("B) a ≤ n, a := 0")
+
+    def test_question_and_options_are_kept_together(self) -> None:
+        document = assemble_docx(_classified(), vision_provider=_Fixed(_page_result()))
+        by_text = {p.text: p for p in document.paragraphs if p.text}
+        assert by_text["Sual 2. Ikinci sual haqqinda?"].paragraph_format.keep_with_next
+        assert by_text["B) a ≤ n, a := 0"].paragraph_format.keep_with_next
+        assert not by_text["C) a ≥ n, ə ı ş ç ğ ö ü"].paragraph_format.keep_with_next
+
+    def test_line_breaks_inside_a_run_become_spaces(self) -> None:
+        result = _page_result()
+        assert result.page is not None
+        result.page.blocks[0].runs = [TextRun(text="Birinci\nsətir")]
+        document = assemble_docx(_classified(), vision_provider=_Fixed(result))
+        assert document.paragraphs[0].text == "Birinci sətir"
+        assert (
+            document.element.body.findall(
+                "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}br"
+            )
+            == []
+        )
 
     def test_figure_fits_the_page_width(self) -> None:
         document = assemble_docx(_classified(), vision_provider=_Fixed(_page_result()))
@@ -492,6 +530,33 @@ class TestPptx:
                         and b.top < a.top + a.height
                     )
 
+    def test_page_table_has_no_header_styling(self) -> None:
+        from pptx.oxml.ns import qn
+
+        tables = [
+            sh.table
+            for s in self._prs().slides
+            for sh in s.shapes
+            if getattr(sh, "has_table", False) and sh.has_table
+        ]
+        assert len(tables) == 1
+        tbl_pr = tables[0]._tbl.find(qn("a:tblPr"))
+        assert tbl_pr.get("firstRow") == "0" and tbl_pr.get("bandRow") == "0"
+
+    def test_a_chart_caption_stays_on_the_chart_slide(self) -> None:
+        graph, _ = run_fixture("sum_loop")
+        blocks = [
+            PageBlock(kind=BlockKind.FLOWCHART, diagram=graph, box_2d=[1, 1, 9, 9]),
+            _text(TextStyle.PARAGRAPH, "Sxem 3. Cəmin hesablanması.", (1, 1, 2, 2)),
+        ]
+        result = VisionResult(
+            content_type=ContentType.PAGE, page=PageAnalysis(blocks=blocks)
+        )
+        prs = assemble_pptx(_classified(), vision_provider=_Fixed(result))
+        assert len(prs.slides) == 1
+        texts = [sh.text_frame.text for sh in prs.slides[0].shapes if sh.has_text_frame]
+        assert "Sxem 3. Cəmin hesablanması." in texts
+
     def test_figure_is_a_picture(self) -> None:
         pictures = [
             sh for s in self._prs().slides for sh in s.shapes if sh.shape_type == 13
@@ -539,6 +604,8 @@ class TestSwitchAndCache:
         png = crop_figure(_PAGE_IMAGE, _box((100, 1000, 400, 1150)))
         assert png is not None
         with Image.open(io.BytesIO(png)) as img:
-            assert abs(img.width - 300) <= 3 and abs(img.height - 150) <= 3
+            # 12/1000 of the image is added on every side (clipped letters)
+            assert abs(img.width - (300 + 2 * 0.012 * _W)) <= 3
+            assert abs(img.height - (150 + 2 * 0.012 * _H)) <= 3
         assert crop_figure(_PAGE_IMAGE, None) is None
         assert crop_figure(b"junk", [0, 0, 500, 500]) is None

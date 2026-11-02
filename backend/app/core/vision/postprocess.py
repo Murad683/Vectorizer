@@ -89,8 +89,16 @@ def parse_vision_analysis(raw_output: str) -> VisionAnalysis | None:
 
 # Ghost-text filter (page mode). Measured on a real photographed page: printed
 # text has an ink/paper ratio of 0.7-0.8, the mirrored text showing through the
-# paper 0.1-0.15 and pen handwriting about 0.3, in shadow as well as in light.
-_MIN_INK_RATIO = 0.4
+# paper 0.1-0.15, in shadow as well as in light. Handwriting (about 0.3, but
+# thin and sparse) cannot be told apart reliably: the prompt covers it.
+_MIN_INK_RATIO = 0.35
+# A box that lands on blank paper (ratio ~0) is a misplaced box, not ghost
+# text: such blocks are kept, only clearly faint ink is dropped.
+_BLANK_RATIO = 0.03
+# Models place boxes a little off, so the ink is measured in a slightly larger
+# window (of 1000): a real line then still finds its dark text.
+_WINDOW_DY = 25
+_WINDOW_DX = 10
 _EDGE_MARGIN = 6  # of 1000: a block this close to the image edge is cut off
 _EDGE_MAX_CHARS = 60  # only short fragments are dropped for touching the edge
 
@@ -184,6 +192,16 @@ def ink_ratio(gray: Image.Image, box: list[int]) -> float:
     return (paper - percentile(0.03)) / paper
 
 
+def _inflate(box: list[int]) -> list[int]:
+    ymin, xmin, ymax, xmax = box
+    return [
+        max(0, ymin - _WINDOW_DY),
+        max(0, xmin - _WINDOW_DX),
+        min(1000, ymax + _WINDOW_DY),
+        min(1000, xmax + _WINDOW_DX),
+    ]
+
+
 def filter_page(page: PageAnalysis, image: bytes) -> PageAnalysis:
     """Remove text the model should have skipped: ghost, handwriting, cut-off.
 
@@ -211,8 +229,8 @@ def filter_page(page: PageAnalysis, image: bytes) -> PageAnalysis:
             if touches_edge and len(block.text) < _EDGE_MAX_CHARS:
                 logger.info("Dropped a cut-off fragment: %r", block.text[:40])
                 continue
-            ratio = ink_ratio(gray, box)
-            if ratio < _MIN_INK_RATIO:
+            ratio = ink_ratio(gray, _inflate(box))
+            if _BLANK_RATIO <= ratio < _MIN_INK_RATIO:
                 logger.info("Dropped faint text (%.2f): %r", ratio, block.text[:40])
                 continue
         kept.append(block)

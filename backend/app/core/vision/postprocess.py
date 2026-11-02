@@ -16,6 +16,7 @@ from app.core.diagram_detect import Detection, apply_detection
 from app.core.rich_text import LatexError, latex_markup
 from app.models.diagram import DiagramGraph
 from app.models.document import ContentType, VisionAnalysis
+from app.models.page import BlockKind, PageAnalysis, PageBlock
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,11 @@ def parse_vision_analysis(raw_output: str) -> VisionAnalysis | None:
         analysis = VisionAnalysis.model_validate_json(raw_output)
     except ValidationError:
         return None
+    if analysis.content_type == ContentType.PAGE:
+        if analysis.page is None:
+            return None
+        analysis.page = clean_page(analysis.page)
+        return analysis if analysis.page.blocks else None
     if analysis.content_type == ContentType.DIAGRAM:
         if analysis.diagram is None or _normalise_graph(analysis.diagram) is None:
             return None
@@ -79,6 +85,138 @@ def parse_vision_analysis(raw_output: str) -> VisionAnalysis | None:
     ):
         return None
     return analysis
+
+
+# Ghost-text filter (page mode). Measured on a real photographed page: printed
+# text has an ink/paper ratio of 0.7-0.8, the mirrored text showing through the
+# paper 0.1-0.15 and pen handwriting about 0.3, in shadow as well as in light.
+_MIN_INK_RATIO = 0.4
+_EDGE_MARGIN = 6  # of 1000: a block this close to the image edge is cut off
+_EDGE_MAX_CHARS = 60  # only short fragments are dropped for touching the edge
+
+
+def _valid_box(box: list[int] | None) -> list[int] | None:
+    """Clamp a [ymin, xmin, ymax, xmax] box to 0-1000; None if unusable."""
+    if box is None or len(box) != 4:
+        return None
+    ymin, xmin, ymax, xmax = (max(0, min(1000, int(v))) for v in box)
+    if ymax <= ymin or xmax <= xmin:
+        return None
+    return [ymin, xmin, ymax, xmax]
+
+
+def clean_page(page: PageAnalysis) -> PageAnalysis:
+    """Drop blocks that carry nothing usable; keep reading order.
+
+    A flowchart without arrows cannot be drawn, so it is kept as a figure
+    (cut out of the image) when it has a box; a figure without a box cannot
+    be cut out and is dropped.
+    """
+    kept: list[PageBlock] = []
+    for block in page.blocks:
+        block.box_2d = _valid_box(block.box_2d)
+        if block.kind == BlockKind.TEXT:
+            block.runs = [r for r in block.runs or [] if r.text]
+            if block.text.strip():
+                kept.append(block)
+        elif block.kind == BlockKind.TABLE:
+            rows = [r for r in block.rows or [] if any(c.strip() for c in r)]
+            if rows:
+                block.rows = rows
+                kept.append(block)
+        elif block.kind == BlockKind.FLOWCHART:
+            graph = _normalise_graph(block.diagram) if block.diagram else None
+            if graph is not None and graph.edges:
+                block.diagram = graph
+                kept.append(block)
+            elif block.box_2d is not None:
+                block.kind = BlockKind.FIGURE
+                block.diagram = None
+                kept.append(block)
+        elif block.box_2d is not None:  # FIGURE
+            kept.append(block)
+    return PageAnalysis(blocks=kept)
+
+
+def page_topology_problems(page: PageAnalysis) -> list[str]:
+    """Structural problems of every flowchart block of the page."""
+    problems: list[str] = []
+    for block in page.blocks:
+        if block.kind == BlockKind.FLOWCHART and block.diagram is not None:
+            problems.extend(topology_problems(block.diagram))
+    return problems
+
+
+def ink_ratio(gray: Image.Image, box: list[int]) -> float:
+    """How strongly dark ink stands out from the paper inside ``box``.
+
+    ``(paper - ink) / paper`` from the 50th and 3rd brightness percentiles of
+    the region; 0 for an empty region.
+    """
+    width, height = gray.size
+    ymin, xmin, ymax, xmax = box
+    left = int(xmin / 1000 * width)
+    top = int(ymin / 1000 * height)
+    region = gray.crop(
+        (
+            left,
+            top,
+            max(left + 1, int(xmax / 1000 * width)),
+            max(top + 1, int(ymax / 1000 * height)),
+        )
+    )
+    histogram = region.histogram()
+    total = sum(histogram)
+    if total == 0:
+        return 0.0
+
+    def percentile(fraction: float) -> int:
+        seen = 0
+        for value, count in enumerate(histogram):
+            seen += count
+            if seen >= total * fraction:
+                return value
+        return 255
+
+    paper = percentile(0.5)
+    if paper <= 0:
+        return 0.0
+    return (paper - percentile(0.03)) / paper
+
+
+def filter_page(page: PageAnalysis, image: bytes) -> PageAnalysis:
+    """Remove text the model should have skipped: ghost, handwriting, cut-off.
+
+    Deterministic second line of defence behind the prompt. Only text and
+    table blocks are tested; if the image cannot be read the page is
+    returned unchanged.
+    """
+    try:
+        with Image.open(io.BytesIO(image)) as img:
+            gray = img.convert("L")
+    except Exception:  # noqa: BLE001 - keep the model answer as it is
+        logger.warning("Could not read the image for the ghost-text filter")
+        return page
+    kept: list[PageBlock] = []
+    for block in page.blocks:
+        box = block.box_2d
+        if block.kind in (BlockKind.TEXT, BlockKind.TABLE) and box is not None:
+            ymin, xmin, ymax, xmax = box
+            touches_edge = (
+                xmin <= _EDGE_MARGIN
+                or xmax >= 1000 - _EDGE_MARGIN
+                or ymin <= _EDGE_MARGIN
+                or ymax >= 1000 - _EDGE_MARGIN
+            )
+            if touches_edge and len(block.text) < _EDGE_MAX_CHARS:
+                logger.info("Dropped a cut-off fragment: %r", block.text[:40])
+                continue
+            ratio = ink_ratio(gray, box)
+            if ratio < _MIN_INK_RATIO:
+                logger.info("Dropped faint text (%.2f): %r", ratio, block.text[:40])
+                continue
+        kept.append(block)
+    return PageAnalysis(blocks=kept)
 
 
 def topology_problems(graph: DiagramGraph) -> list[str]:

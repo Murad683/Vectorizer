@@ -15,11 +15,15 @@ class VisionProvider(ABC):
     """
 
     @abstractmethod
-    def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
+    def analyze_diagram(
+        self, image: bytes, context: str | None = None, page: bool = False
+    ) -> VisionResult:
         """Analyze a diagram image and return its Mermaid reconstruction.
 
         Args:
             image: raw image bytes (PNG/JPEG).
             context: optional surrounding text from the source document,
                 to help the model resolve ambiguous labels.
+            page: the image is a whole page (text, flowchart, figures) and
+                the result carries ``page`` blocks instead of one diagram.
         """

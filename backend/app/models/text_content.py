@@ -25,6 +25,10 @@ class TextRun(BaseModel):
         default=False,
         description="True for subscript digits (e.g. the base in 65₁₀).",
     )
+    superscript: bool = Field(
+        default=False,
+        description="True for raised characters (e.g. the 2 in x² or the y in x^y).",
+    )
 
 
 class TextLine(BaseModel):
@@ -35,7 +39,14 @@ class TextLine(BaseModel):
     def to_run_dicts(self) -> list[dict[str, str | None]]:
         """Convert to the extractor's ``metadata['runs']`` convention."""
         return [
-            {"text": run.text, "vert_align": "subscript" if run.subscript else None}
+            {
+                "text": run.text,
+                "vert_align": (
+                    "subscript"
+                    if run.subscript
+                    else "superscript" if run.superscript else None
+                ),
+            }
             for run in self.runs
             if run.text
         ]

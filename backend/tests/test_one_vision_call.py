@@ -27,7 +27,9 @@ class _Counting(VisionProvider):
         self.result = result
         self.calls = 0
 
-    def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
+    def analyze_diagram(
+        self, image: bytes, context: str | None = None, page: bool = False
+    ) -> VisionResult:
         self.calls += 1
         return self.result.model_copy(deep=True)
 

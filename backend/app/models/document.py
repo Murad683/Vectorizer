@@ -7,6 +7,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from app.models.diagram import DiagramGraph
+from app.models.page import PageAnalysis
 from app.models.text_content import TextContent
 
 
@@ -71,6 +72,7 @@ class ContentType(str, Enum):
 
     DIAGRAM = "diagram"  # a flowchart → DiagramGraph
     TEXT_CONTENT = "text_content"  # scanned text/matching lists → TextContent
+    PAGE = "page"  # a whole page: text, flowchart, figures → PageAnalysis
 
 
 class VisionResult(BaseModel):
@@ -86,6 +88,7 @@ class VisionResult(BaseModel):
     content_type: ContentType | None = None
     diagram_graph: DiagramGraph | None = None
     text_content: TextContent | None = None
+    page: PageAnalysis | None = None
     confidence_note: str | None = None
     error: str | None = None
 
@@ -101,3 +104,4 @@ class VisionAnalysis(BaseModel):
     content_type: ContentType
     diagram: DiagramGraph | None = None
     text_content: TextContent | None = None
+    page: PageAnalysis | None = None

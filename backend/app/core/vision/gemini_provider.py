@@ -18,6 +18,8 @@ from app.core.vision.budget import VisionBudget, VisionBudgetExceededError
 from app.core.vision.debug_dump import DebugDump
 from app.core.vision.postprocess import (
     attach_geometry,
+    filter_page,
+    page_topology_problems,
     parse_diagram_graph,
     parse_vision_analysis,
     pick_better_answer,
@@ -49,7 +51,7 @@ _REQUEST_TIMEOUT_MS = 60_000
 
 _TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 
-_PROMPT = """\
+_PROMPT_HEAD = """\
 You are given a scanned image from an Azerbaijani school informatics test.
 FIRST decide what it is, then extract it into the matching JSON payload.
 
@@ -60,6 +62,10 @@ question made of two labeled lists (a numbered list and a lettered list).
 
 If content_type is "diagram", fill "diagram" with {nodes, edges, title, \
 title_below}:
+"""
+
+# The node/arrow rules, shared by the single-diagram prompt and the page prompt.
+_FLOWCHART_RULES = """\
 - One node per flowchart symbol. shape_type is one of:
   "terminator" (oval/stadium/rounded box, e.g. Başlanğıc / Son / START),
   "process" (plain rectangle, e.g. assignments),
@@ -125,6 +131,9 @@ image height / width). Measure carefully: the output layout reproduces the \
 original arrangement from these boxes.
 - Node ids "n1", "n2", ... in reading order. Include loop-back arrows.
 - A flowchart always has arrows, so "edges" must not be empty.
+"""
+
+_PROMPT_TAIL = """\
 - "title" is a heading or caption line that belongs to the flowchart but \
 sits OUTSIDE its symbols and arrows — either above it (e.g. "Problem 2: \
 ...", "Blok-sxem nəyi hesablayır?") or below it (e.g. "Sxem 3. ... \
@@ -149,6 +158,61 @@ such line — never invent heading text that isn't actually in the image.
 subscript.
 Leave "diagram" null in this case.
 """
+
+_PROMPT = _PROMPT_HEAD + _FLOWCHART_RULES + _PROMPT_TAIL
+
+_PAGE_HEAD = """\
+You are given a PHOTOGRAPH or SCAN of a PAGE from an Azerbaijani school \
+informatics test (a book page, a phone screenshot of a PDF, or a crop of one). \
+Describe the whole page as "blocks" in READING ORDER.
+
+Set "content_type" to "page" and fill "page" with {"blocks": [...]}. Leave \
+"diagram" and "text_content" null.
+
+Every block has "kind" and "box_2d" ([ymin, xmin, ymax, xmax], integers \
+normalised to 0-1000 relative to the image height / width, tight around the \
+block). The kinds:
+- "text": printed text. Give "style": "heading" for a question line that \
+starts with its number ("118. ..."), "option" for an answer line that starts \
+with a letter ("A) ...", "B) ..."), otherwise "paragraph". Give "runs": each \
+run has "text", "subscript" and "superscript" (booleans; true only for \
+characters printed lowered or raised, e.g. the base in 65 with a small 10, or \
+the y in x^y). One block per question stem (join its wrapped lines with a \
+single space) and one block per answer option.
+- "table": a printed grid; "rows" is a list of rows, each a list of cell texts.
+- "flowchart": an algorithm flowchart (symbols joined by arrows). Fill \
+"diagram" with {nodes, edges} following the flowchart rules below, leave its \
+"title" null and "title_below" false: the question text above or below the \
+chart is its own "text" block. "box_2d" is the box around the whole chart.
+- "figure": any other picture that cannot be written as text: a drawing, \
+graph, plot, pattern matrix, geometric shape, photo, or a picture used as an \
+answer option. "box_2d" is tight around it, including the letters that label \
+its options. Never also copy a figure's inner text into text blocks.
+
+Text rules:
+- Preserve every character EXACTLY as printed: Azerbaijani letters (ə, ı, ş, \
+ç, ğ, ö, ü, İ), digits and mathematical signs (< > ≤ ≥ ≠ = := + - × ÷ ...). \
+Do not translate, compute, complete or correct anything.
+- A fraction printed stacked (numerator above a bar) is written inline with a \
+slash: "1/3".
+- Old scans print "ə" as "›" or a similar broken glyph: write the intended \
+letter and keep every syllable.
+
+Page rules:
+- Reading order is top to bottom. On a page with two columns, give the whole \
+LEFT column first, then the whole RIGHT column.
+- Include only the printed content of the main page. IGNORE and never output: \
+faint, washed-out or mirrored text showing through from the back of the \
+paper; handwriting and pen marks; text cut off by the edge of the image (half \
+lines at the border); phone status bars, app toolbars and page counters \
+(e.g. "9/60"); watermarks; running headers and footers; page numbers; \
+content of the neighbouring page. If you are unsure whether something is \
+printed text or a ghost, skip it.
+
+Flowchart rules (for blocks of kind "flowchart"):
+"""
+
+_PAGE_PROMPT = _PAGE_HEAD + _FLOWCHART_RULES
 
 
 def _mime_type(image: bytes) -> str:
@@ -189,7 +253,10 @@ class GeminiVisionProvider(VisionProvider):
             self._budget.consume()
 
     def _retry_topology(
-        self, contents: list[str | genai_types.Part], problems: list[str]
+        self,
+        contents: list[str | genai_types.Part],
+        problems: list[str],
+        expect: ContentType = ContentType.DIAGRAM,
     ) -> tuple[VisionAnalysis | None, str]:
         """Single corrective call listing what was structurally wrong.
 
@@ -217,18 +284,65 @@ class GeminiVisionProvider(VisionProvider):
             return None, ""
         raw = response.text or ""
         analysis = parse_vision_analysis(raw)
-        if analysis is None or analysis.content_type != ContentType.DIAGRAM:
+        if analysis is None or analysis.content_type != expect:
             return None, raw
         return analysis, raw
 
-    def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
+    def _finish_page(
+        self,
+        analysis: VisionAnalysis,
+        raw_output: str,
+        image: bytes,
+        detection: Detection | None,
+        marked: bool,
+        contents: list[str | genai_types.Part],
+        dump: DebugDump,
+        meta: dict[str, object],
+    ) -> VisionResult:
+        """Check, filter and finish a whole-page answer."""
+        page = analysis.page
+        assert page is not None
+        problems = page_topology_problems(page)
+        meta["problems"] = problems
+        if problems:
+            # Same single corrective re-ask as for a lone diagram.
+            logger.warning("Page flowchart incomplete: %s", "; ".join(problems))
+            retry, retry_raw = self._retry_topology(
+                contents, problems, expect=ContentType.PAGE
+            )
+            dump.text("retry.json", retry_raw)
+            kept = (
+                retry is not None
+                and retry.page is not None
+                and len(page_topology_problems(retry.page)) < len(problems)
+            )
+            meta["retry_kept"] = kept
+            if kept and retry is not None and retry.page is not None:
+                page, raw_output = retry.page, retry_raw
+        page = filter_page(page, image)
+        for block in page.blocks:
+            if block.diagram is not None:
+                attach_geometry(block.diagram, image, detection, marked=marked)
+        dump.text("page.json", page.model_dump_json(indent=2))
+        dump.json("meta.json", meta)
+        return VisionResult(
+            raw_model_output=raw_output,
+            content_type=ContentType.PAGE,
+            page=page,
+            confidence_note=f"Generated by {self._model_name}. Read as a whole page.",
+        )
+
+    def analyze_diagram(
+        self, image: bytes, context: str | None = None, page: bool = False
+    ) -> VisionResult:
         """Classify the image and extract it in ONE call.
 
         Method name kept for the interface; despite the name it also
         handles TEXT_CONTENT images. Returns a ``VisionResult`` whose
-        ``content_type`` selects ``diagram_graph`` or ``text_content``.
+        ``content_type`` selects ``diagram_graph``, ``text_content`` or, with
+        ``page=True``, the ``page`` blocks of a whole page.
         """
-        prompt = _PROMPT
+        prompt = _PAGE_PROMPT if page else _PROMPT
         dump = DebugDump(image)
         detection: Detection | None = None
         try:
@@ -318,6 +432,17 @@ class GeminiVisionProvider(VisionProvider):
 
         dump.text("response.json", raw_output)
         meta: dict[str, object] = {"model": self._model_name, "context": context}
+        if analysis.content_type == ContentType.PAGE and analysis.page is not None:
+            return self._finish_page(
+                analysis,
+                raw_output,
+                image,
+                detection,
+                marked is not None,
+                contents,
+                dump,
+                meta,
+            )
         if analysis.content_type == ContentType.DIAGRAM and analysis.diagram:
             problems = topology_problems(analysis.diagram)
             meta["problems"] = problems

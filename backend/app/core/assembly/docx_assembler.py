@@ -20,12 +20,20 @@ from docx.shared import Emu, Inches, Mm
 from docx.text.paragraph import Paragraph
 from PIL import Image
 
+from app.core.assembly.page_blocks import (
+    analyze_image,
+    crop_figure,
+    fit_inches,
+    runs_to_dicts,
+    use_page_mode,
+)
 from app.core.layout import layout_graph
 from app.core.render.docx_shapes import add_diagram_to_docx
 from app.core.rich_text import flatten_title, markup_runs
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
+from app.models.page import BlockKind, PageAnalysis
 from app.models.text_content import TextContent
 
 logger = logging.getLogger(__name__)
@@ -150,7 +158,11 @@ def _add_vision_element(
     """
     image = item.element.raw_content
     assert isinstance(image, bytes)
-    result = provider.analyze_diagram(image, context=context)
+    result = analyze_image(provider, image, context, use_page_mode(item))
+
+    if result.page is not None:
+        _add_page(document, result.page, image)
+        return
 
     if result.text_content is not None and _add_text_content(
         document, result.text_content
@@ -181,6 +193,55 @@ def _add_vision_element(
         result.error or "degenerate content",
     )
     document.add_picture(BytesIO(image), width=Inches(_picture_width_in(image)))
+
+
+def _content_width_in(document: Document) -> float:
+    section = document.sections[0]
+    page_width = section.page_width or Mm(210)
+    left = section.left_margin or Inches(1)
+    right = section.right_margin or Inches(1)
+    return float((page_width - left - right) / 914400)
+
+
+def _add_rows_table(document: Document, rows: list[list[str]]) -> None:
+    """A native table from rows of cell texts (ragged rows are padded)."""
+    n_cols = max(len(row) for row in rows)
+    table = document.add_table(rows=len(rows), cols=n_cols)
+    table.style = "Table Grid"
+    for row_idx, cells in enumerate(rows):
+        for col_idx, text in enumerate(cells):
+            table.cell(row_idx, col_idx).text = text
+
+
+def _add_page(document: Document, page: PageAnalysis, image: bytes) -> None:
+    """Write the blocks of a whole page in reading order.
+
+    Text becomes editable paragraphs, the flowchart native shapes, and every
+    figure a picture cut out of the source image.
+    """
+    for block in page.blocks:
+        if block.kind == BlockKind.TEXT:
+            paragraph = document.add_paragraph()
+            _emit_runs(paragraph, runs_to_dicts(block.runs or []))
+        elif block.kind == BlockKind.TABLE and block.rows:
+            _add_rows_table(document, block.rows)
+        elif block.kind == BlockKind.FLOWCHART and block.diagram is not None:
+            layouted = layout_graph(block.diagram)
+            add_diagram_to_docx(
+                layouted,
+                document,
+                max_width_emu=_DIAGRAM_MAX_W,
+                max_height_emu=_DIAGRAM_MAX_H,
+                offset_y_emu=_DIAGRAM_TOP_OFFSET,
+                relative_from="paragraph",
+            )
+            _flow_text_around(document)
+        elif block.kind == BlockKind.FIGURE:
+            png = crop_figure(image, block.box_2d)
+            if png is None:
+                continue
+            width_in, _ = fit_inches(png, _content_width_in(document), 8.0)
+            document.add_picture(BytesIO(png), width=Inches(width_in))
 
 
 def _add_rich_paragraph(document: Document, text: str) -> None:

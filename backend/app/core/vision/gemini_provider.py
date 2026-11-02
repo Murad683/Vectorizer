@@ -275,13 +275,12 @@ class GeminiVisionProvider(VisionProvider):
             response_schema=VisionAnalysis,
             http_options=genai_types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
         )
-        # Temperature 0: the same page should give the same answer. At the
-        # default, a dense page came back without any text in about half of
-        # the live runs.
+        # Never set a temperature here: measured live, an explicit 0 or 0.3 made
+        # the request hit the 504 deadline (3 minutes) where the default answers
+        # in about 5 seconds.
         self._page_config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=VisionAnalysis,
-            temperature=0.0,
             http_options=genai_types.HttpOptions(timeout=_PAGE_REQUEST_TIMEOUT_MS),
         )
 

@@ -8,6 +8,7 @@ code as the live pipeline without importing any vision SDK.
 
 import io
 import logging
+import re
 
 from PIL import Image
 from pydantic import ValidationError
@@ -113,6 +114,7 @@ def _valid_box(box: list[int] | None) -> list[int] | None:
     return [ymin, xmin, ymax, xmax]
 
 
+_LONE_NUMBER = re.compile(r"\d{1,3}\.?")
 _LABEL_MAX_CHARS = 25  # short text inside a figure is part of the picture
 _INSIDE_FRACTION = 0.8
 
@@ -141,7 +143,9 @@ def clean_page(page: PageAnalysis) -> PageAnalysis:
         block.box_2d = _valid_box(block.box_2d)
         if block.kind == BlockKind.TEXT:
             block.runs = [r for r in block.runs or [] if r.text]
-            if block.text.strip():
+            text = block.text.strip()
+            # A lone number is the page number in its box, not a question.
+            if text and not _LONE_NUMBER.fullmatch(text):
                 kept.append(block)
         elif block.kind == BlockKind.TABLE:
             rows = [r for r in block.rows or [] if any(c.strip() for c in r)]

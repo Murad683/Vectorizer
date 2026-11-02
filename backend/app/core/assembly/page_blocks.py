@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 _QUESTION_START = re.compile(r"^\s*\d+\s*[.)]")
 _OPTION_START = re.compile(r"^\s*[A-Ea-e]\s*\)")
 
+# Figures are cut a little wider than the model's box: it often clips the
+# option letters ("A)") at the edge. Units of 1000.
+_CROP_PAD = 12
+
 # A flowchart slide keeps its question lines and options on the same slide
 # only while they leave this much of the slide to the chart.
 MAX_GROUPED_TEXT_IN = 3.2
@@ -49,7 +53,7 @@ def runs_to_dicts(runs: list[TextRun]) -> list[dict[str, str | None]]:
     """Convert page runs to the run-dict convention of the assemblers."""
     return [
         {
-            "text": run.text,
+            "text": run.text.replace("\r", "").replace("\n", " "),
             "vert_align": (
                 "subscript"
                 if run.subscript
@@ -69,6 +73,8 @@ def crop_figure(image: bytes, box_2d: list[int] | None) -> bytes | None:
         with Image.open(io.BytesIO(image)) as img:
             width, height = img.size
             ymin, xmin, ymax, xmax = box_2d
+            ymin, xmin = max(0, ymin - _CROP_PAD), max(0, xmin - _CROP_PAD)
+            ymax, xmax = min(1000, ymax + _CROP_PAD), min(1000, xmax + _CROP_PAD)
             left = int(xmin / 1000 * width)
             top = int(ymin / 1000 * height)
             right = min(width, max(left + 1, int(xmax / 1000 * width)))
@@ -132,14 +138,13 @@ def group_blocks(blocks: list[PageBlock]) -> list[PageBlock | FlowUnit]:
             probe -= 1
         end = index
         probe = index + 1
+        # Everything up to the next question belongs to the chart: its answer
+        # options and a caption such as "Sxem 3. ...".
         while (
             probe < len(blocks)
             and blocks[probe].kind == BlockKind.TEXT
             and not _QUESTION_START.match(blocks[probe].text)
-            and (
-                blocks[probe].style == TextStyle.OPTION
-                or _OPTION_START.match(blocks[probe].text)
-            )
+            and blocks[probe].style != TextStyle.HEADING
         ):
             end = probe
             probe += 1

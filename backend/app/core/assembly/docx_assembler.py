@@ -16,7 +16,7 @@ import docx
 from docx.document import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Emu, Inches, Mm
+from docx.shared import Emu, Inches, Mm, Pt
 from docx.text.paragraph import Paragraph
 from PIL import Image
 
@@ -33,7 +33,7 @@ from app.core.rich_text import flatten_title, markup_runs
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
-from app.models.page import BlockKind, PageAnalysis
+from app.models.page import BlockKind, PageAnalysis, PageBlock, TextStyle
 from app.models.text_content import TextContent
 
 logger = logging.getLogger(__name__)
@@ -213,16 +213,43 @@ def _add_rows_table(document: Document, rows: list[list[str]]) -> None:
             table.cell(row_idx, col_idx).text = text
 
 
+def _tidy_page_paragraph(
+    paragraph: Paragraph, block: PageBlock, following: PageBlock | None
+) -> None:
+    """Keep a question with what belongs to it and answer options together.
+
+    Options are printed as a compact list; a question line stays on the page
+    of the chart, figure or option that follows it (Word otherwise leaves an
+    option or two alone on the next page).
+    """
+    options_follow = (
+        following is not None
+        and following.kind == BlockKind.TEXT
+        and following.style == TextStyle.OPTION
+    )
+    if block.style == TextStyle.OPTION:
+        paragraph.paragraph_format.space_after = Pt(8 if not options_follow else 2)
+        paragraph.paragraph_format.keep_with_next = options_follow
+    elif block.style == TextStyle.HEADING or (
+        following is not None
+        and following.kind in (BlockKind.FLOWCHART, BlockKind.FIGURE)
+    ):
+        paragraph.paragraph_format.keep_with_next = True
+
+
 def _add_page(document: Document, page: PageAnalysis, image: bytes) -> None:
     """Write the blocks of a whole page in reading order.
 
     Text becomes editable paragraphs, the flowchart native shapes, and every
     figure a picture cut out of the source image.
     """
-    for block in page.blocks:
+    blocks = page.blocks
+    for index, block in enumerate(blocks):
+        following = blocks[index + 1] if index + 1 < len(blocks) else None
         if block.kind == BlockKind.TEXT:
             paragraph = document.add_paragraph()
             _emit_runs(paragraph, runs_to_dicts(block.runs or []))
+            _tidy_page_paragraph(paragraph, block, following)
         elif block.kind == BlockKind.TABLE and block.rows:
             _add_rows_table(document, block.rows)
         elif block.kind == BlockKind.FLOWCHART and block.diagram is not None:

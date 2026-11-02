@@ -184,9 +184,16 @@ def _add_table(cursor: _SlideCursor, item: ClassifiedElement) -> None:
 
 
 def _place_table(
-    cursor: _SlideCursor, cells_per_row: list[list[str]], n_cols: int
+    cursor: _SlideCursor,
+    cells_per_row: list[list[str]],
+    n_cols: int,
+    plain: bool = False,
 ) -> None:
-    """Append a native table at the current fill position."""
+    """Append a native table at the current fill position.
+
+    ``plain`` gives a simple grid without the coloured header row and banding
+    (tables read from a page have no header styling of their own).
+    """
     height_in = len(cells_per_row) * _ROW_H_IN
     slide = cursor.fit(height_in)
     shape = slide.shapes.add_table(
@@ -198,6 +205,8 @@ def _place_table(
         Inches(height_in),
     )
     table = shape.table
+    if plain:
+        _remove_pptx_table_style(table, _TABLE_GRID_GUID)
     for row_idx, cells in enumerate(cells_per_row):
         for col_idx, text in enumerate(cells[:n_cols]):
             cell = table.cell(row_idx, col_idx)
@@ -357,7 +366,10 @@ def _add_page(cursor: _SlideCursor, page: PageAnalysis, image: bytes) -> None:
         elif item.kind == BlockKind.TABLE and item.rows:
             n_cols = max(len(row) for row in item.rows)
             _place_table(
-                cursor, [r + [""] * (n_cols - len(r)) for r in item.rows], n_cols
+                cursor,
+                [r + [""] * (n_cols - len(r)) for r in item.rows],
+                n_cols,
+                plain=True,
             )
         elif item.kind == BlockKind.FIGURE:
             png = crop_figure(image, item.box_2d)
@@ -366,6 +378,7 @@ def _add_page(cursor: _SlideCursor, page: PageAnalysis, image: bytes) -> None:
 
 
 _NO_STYLE_NO_GRID_GUID = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"
+_TABLE_GRID_GUID = "{5940675A-B579-460E-94D1-54222C63F5DA}"  # "No Style, Table Grid"
 
 
 def _remove_pptx_table_borders(table: Any) -> None:
@@ -388,7 +401,9 @@ def _remove_pptx_table_borders(table: Any) -> None:
                 tc_pr.insert(0, ln)
 
 
-def _remove_pptx_table_style(table: Any) -> None:
+def _remove_pptx_table_style(
+    table: Any, style_guid: str = _NO_STYLE_NO_GRID_GUID
+) -> None:
     """Strip the colored header/row-banding style layer, not just borders.
 
     Border lines (``a:lnL``/``a:lnR``/``a:lnT``/``a:lnB`` on each cell)
@@ -404,7 +419,7 @@ def _remove_pptx_table_style(table: Any) -> None:
     tbl_pr.set("firstRow", "0")
     tbl_pr.set("bandRow", "0")
     style_id = tbl_pr.find(qn("a:tableStyleId"))
-    style_id.text = _NO_STYLE_NO_GRID_GUID
+    style_id.text = style_guid
 
 
 def _add_heading(cursor: _SlideCursor, heading: str) -> None:

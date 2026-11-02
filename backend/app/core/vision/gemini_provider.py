@@ -178,7 +178,11 @@ with a letter ("A) ...", "B) ..."), otherwise "paragraph". Give "runs": each \
 run has "text", "subscript" and "superscript" (booleans; true only for \
 characters printed lowered or raised, e.g. the base in 65 with a small 10, or \
 the y in x^y). One block per question stem (join its wrapped lines with a \
-single space) and one block per answer option.
+single space) and ONE block per answer option: never put several options \
+("A) ... B) ...") into one block, even when they are printed on one line or \
+in columns. When a question is followed by equations, formulas or conditions \
+printed on separate lines, give each printed line its own block (style \
+"paragraph"); only the wrapped lines of an ordinary sentence are joined.
 - "table": a printed grid; "rows" is a list of rows, each a list of cell texts.
 - "flowchart": an algorithm flowchart (symbols joined by arrows). Fill \
 "diagram" with {nodes, edges} following the flowchart rules below, leave its \

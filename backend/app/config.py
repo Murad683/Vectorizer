@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # answers use about 300-2 000; one in ~28 once ran away to 65 000 tokens
     # ($0.10, two minutes). Do not touch temperature, see gemini_provider.
     page_max_output_tokens: int = Field(default=12000, ge=1000)
+    # Gemini list prices in USD per million tokens (gemini-3.1-flash-lite); only
+    # used to estimate the cost in the usage log. Update when the model changes.
+    gemini_price_in_per_m: float = Field(default=0.25, ge=0)
+    gemini_price_out_per_m: float = Field(default=1.50, ge=0)
     # Second line of defence against ghost text (ink-contrast check). Off: on
     # real pages the model leaves ghost text out by itself, while the check
     # dropped real lines when a box was a little off. Needs calibration on

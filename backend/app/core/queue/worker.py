@@ -15,6 +15,7 @@ polling the SQLite store on a fixed interval. Reasoning:
 
 import asyncio
 import logging
+import time
 import traceback
 from pathlib import Path
 
@@ -22,8 +23,8 @@ from app.config import get_settings
 from app.core import vision as vision_pkg
 from app.core.assembly import assemble_docx, assemble_pptx
 from app.core.classifier import classify_elements
-from app.core.ingestion import get_extractor
-from app.core.queue.models import JobStatus
+from app.core.ingestion import count_pdf_pages, get_extractor
+from app.core.queue.models import Job, JobStatus
 from app.core.queue.store import JobStore
 from app.core.vision import VisionBudget, VisionBudgetExceededError
 from app.core.vision.cache import CachedVisionProvider
@@ -38,6 +39,53 @@ _BUDGET_EXCEEDED_MESSAGE = (
     "Bu iş üçün icazə verilən süni intellekt sorğularının sayı aşıldı. "
     "Faylı bölüb daha kiçik hissələrlə yenidən yükləyin."
 )
+
+
+def _count_input_pages(path: Path) -> int | None:
+    """Pages of the input for the usage log: PDF page count, 1 per image."""
+    try:
+        ext = path.suffix.lower()
+        if ext == ".pdf":
+            return count_pdf_pages(path.read_bytes())
+        if ext in {".png", ".jpg", ".jpeg"}:
+            return 1
+    except Exception:  # noqa: BLE001 - the log is optional
+        logger.debug("Could not count the pages of %s", path.name, exc_info=True)
+    return None
+
+
+def _record_usage(
+    store: JobStore,
+    job: Job,
+    budget: VisionBudget,
+    calls_before: int,
+    started: float,
+    outcome: str,
+) -> None:
+    """Write one usage row for this attempt; never lets a failure out."""
+    try:
+        settings = get_settings()
+        cost = (
+            budget.input_tokens * settings.gemini_price_in_per_m
+            + (budget.output_tokens + budget.thought_tokens)
+            * settings.gemini_price_out_per_m
+        ) / 1_000_000
+        path = Path(job.input_path)
+        store.record_usage(
+            job_id=job.id,
+            owner_user_id=job.owner_user_id,
+            file_ext=path.suffix.lower().lstrip("."),
+            pages=_count_input_pages(path),
+            vision_calls=budget.used - calls_before,
+            input_tokens=budget.input_tokens,
+            output_tokens=budget.output_tokens,
+            thought_tokens=budget.thought_tokens,
+            est_cost_usd=cost,
+            duration_s=time.monotonic() - started,
+            outcome=outcome,
+        )
+    except Exception:  # noqa: BLE001 - the usage log must never fail a job
+        logger.warning("Could not write the usage row of job %s", job.id, exc_info=True)
 
 
 def _process_job_sync(
@@ -92,6 +140,10 @@ async def _worker_loop(store: JobStore) -> None:
             limit=get_settings().max_vision_calls_per_job, used=job.vision_calls
         )
 
+        calls_before = budget.used
+        started = time.monotonic()
+        claimed = job
+
         try:
             docx_path, pptx_path = await asyncio.to_thread(
                 _process_job_sync, job.input_path, output_dir, budget
@@ -104,6 +156,7 @@ async def _worker_loop(store: JobStore) -> None:
                 error_message=None,
                 vision_calls=budget.used,
             )
+            _record_usage(store, claimed, budget, calls_before, started, "completed")
             logger.info("Job %s completed", job.id)
         except VisionBudgetExceededError:
             # Terminal: re-running would only spend more, so no retry.
@@ -113,6 +166,7 @@ async def _worker_loop(store: JobStore) -> None:
                 error_message=_BUDGET_EXCEEDED_MESSAGE,
                 vision_calls=budget.used,
             )
+            _record_usage(store, claimed, budget, calls_before, started, "budget")
             logger.error(
                 "Job %s stopped: Gemini request limit (%d) reached",
                 job.id,
@@ -130,6 +184,7 @@ async def _worker_loop(store: JobStore) -> None:
                     error_message=error_msg,
                     vision_calls=budget.used,
                 )
+                _record_usage(store, claimed, budget, calls_before, started, "retry")
                 logger.warning(
                     "Job %s failed (attempt %d/%d), will retry: %s",
                     job.id,
@@ -144,6 +199,7 @@ async def _worker_loop(store: JobStore) -> None:
                     error_message=error_msg,
                     vision_calls=budget.used,
                 )
+                _record_usage(store, claimed, budget, calls_before, started, "failed")
                 logger.error("Job %s failed permanently: %s", job.id, exc)
 
 

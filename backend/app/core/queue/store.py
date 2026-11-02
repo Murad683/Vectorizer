@@ -18,7 +18,7 @@ every other method here.
 import logging
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import DictRow, dict_row
@@ -127,6 +127,54 @@ class JobStore:
         ).fetchone()
         assert row is not None
         return int(row["c"])
+
+    def record_usage(
+        self,
+        *,
+        job_id: UUID,
+        owner_user_id: UUID | None,
+        file_ext: str,
+        pages: int | None,
+        vision_calls: int,
+        input_tokens: int,
+        output_tokens: int,
+        thought_tokens: int,
+        est_cost_usd: float,
+        duration_s: float,
+        outcome: str,
+    ) -> None:
+        """Append one row to the insert-only usage log (numbers only)."""
+        self._conn.execute(
+            """
+            INSERT INTO job_usage
+                (id, job_id, owner_user_id, created_at, file_ext, pages,
+                 vision_calls, input_tokens, output_tokens, thought_tokens,
+                 est_cost_usd, duration_s, outcome)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                uuid4(),
+                job_id,
+                owner_user_id,
+                datetime.now(timezone.utc),
+                file_ext,
+                pages,
+                vision_calls,
+                input_tokens,
+                output_tokens,
+                thought_tokens,
+                round(est_cost_usd, 5),
+                round(duration_s, 1),
+                outcome,
+            ),
+        )
+
+    def usage_rows_since(self, since: datetime) -> list[DictRow]:
+        """Return the usage log rows created at or after ``since``, oldest first."""
+        return self._conn.execute(
+            "SELECT * FROM job_usage WHERE created_at >= %s ORDER BY created_at",
+            (since,),
+        ).fetchall()
 
     def get_job(self, job_id: UUID) -> Job | None:
         """Return the job with the given id, or None."""

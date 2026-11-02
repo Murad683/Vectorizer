@@ -272,3 +272,22 @@ Every deleted file is one journal line: `journalctl -t vectorizer-input-cleanup`
 What to tell customers: *uploaded source files are deleted from the server 24 hours after
 the job finishes; the finished DOCX/PPTX files and the job history stay; to convert a source
 file again, upload it again.*
+
+## Usage log and report
+
+Every finished attempt of a job writes one row to `job_usage` (migration 0004): pages, Gemini
+requests, tokens, estimated cost, duration and outcome (`completed`, `failed`, `budget`,
+`retry`). Numbers only: no file names and no text. Rows are never deleted, also not when a job
+or a user is deleted. A failure to write the row never fails the job.
+
+Read-only report (one SELECT; cost is an estimate from list prices, compare it with the Google
+billing page):
+
+```bash
+docker exec vectorizer-backend python -m app.usage_report --days 7
+```
+
+`GEMINI_PRICE_IN_PER_M` / `GEMINI_PRICE_OUT_PER_M` (USD per million tokens, defaults 0.25 and
+1.50) only affect this estimate; change them in `.env` when the model changes. Every request
+also logs `gemini_usage kind=... in=... out=... thoughts=...` (lost when the container is
+recreated; the table is the permanent record).

@@ -14,12 +14,15 @@ from typing import Any
 
 import docx
 from docx.document import Document
-from docx.shared import Emu, Inches
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Emu, Inches, Mm
 from docx.text.paragraph import Paragraph
+from PIL import Image
 
 from app.core.layout import layout_graph
 from app.core.render.docx_shapes import add_diagram_to_docx
-from app.core.rich_text import markup_runs
+from app.core.rich_text import flatten_title, markup_runs
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
@@ -32,6 +35,41 @@ _NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing
 
 _DIAGRAM_MAX_W = Emu(int(6.0 * 914400))
 _DIAGRAM_MAX_H = Emu(int(7.5 * 914400))
+# With a 0 offset Word puts the first lines of the text above the figure under
+# it; a small gap keeps the whole title above (checked in Word).
+_DIAGRAM_TOP_OFFSET = Emu(int(0.1 * 914400))
+
+_PICTURE_MAX_W_IN = 4.5
+_PICTURE_MAX_H_IN = 8.0
+_DOC_LANGUAGE = "az-Latn-AZ"
+
+
+def _setup_page(document: Document) -> None:
+    """A4 page, 1 in margins, Azerbaijani proofing language."""
+    section = document.sections[0]
+    section.page_width = Mm(210)
+    section.page_height = Mm(297)
+    section.left_margin = section.right_margin = Inches(1)
+    section.top_margin = section.bottom_margin = Inches(1)
+
+    r_pr = document.styles["Normal"].element.get_or_add_rPr()
+    for old in r_pr.findall(qn("w:lang")):
+        r_pr.remove(old)
+    lang = OxmlElement("w:lang")
+    lang.set(qn("w:val"), _DOC_LANGUAGE)
+    r_pr.append(lang)
+
+
+def _picture_width_in(image: bytes) -> float:
+    """Width in inches that keeps the picture within the page (never enlarged)."""
+    try:
+        with Image.open(BytesIO(image)) as img:
+            width_px, height_px = img.size
+    except OSError:
+        return _PICTURE_MAX_W_IN
+    if width_px <= 0 or height_px <= 0:
+        return _PICTURE_MAX_W_IN
+    return min(_PICTURE_MAX_W_IN, _PICTURE_MAX_H_IN * width_px / height_px)
 
 
 def assemble_docx(
@@ -40,6 +78,7 @@ def assemble_docx(
 ) -> Document:
     """Build a complete Document from classified elements, in order."""
     document = docx.Document()
+    _setup_page(document)
     provider: VisionProvider | None = vision_provider
     last_text: str | None = None
 
@@ -128,6 +167,7 @@ def _add_vision_element(
             document,
             max_width_emu=_DIAGRAM_MAX_W,
             max_height_emu=_DIAGRAM_MAX_H,
+            offset_y_emu=_DIAGRAM_TOP_OFFSET,
             relative_from="paragraph",
         )
         _flow_text_around(document)
@@ -140,13 +180,13 @@ def _add_vision_element(
         item.element.id,
         result.error or "degenerate content",
     )
-    document.add_picture(BytesIO(image), width=Inches(4.5))
+    document.add_picture(BytesIO(image), width=Inches(_picture_width_in(image)))
 
 
 def _add_rich_paragraph(document: Document, text: str) -> None:
     """A paragraph honouring _{...}/^{...} markup as sub/superscript runs."""
     paragraph = document.add_paragraph()
-    for chunk, vert in markup_runs(text):
+    for chunk, vert in markup_runs(flatten_title(text)):
         run = paragraph.add_run(chunk)
         # Both flags share one w:vertAlign element: set only the one needed.
         if vert == "sub":

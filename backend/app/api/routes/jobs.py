@@ -1,6 +1,7 @@
 """Job management API: upload, poll status, download results."""
 
 import asyncio
+import contextlib
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -301,6 +302,10 @@ async def delete_job(
                 path.unlink()
             except OSError:
                 logger.warning("Failed to delete file %s for job %s", path, job.id)
+        if path.parent.name == str(job.id):
+            # Only removes the job's own directory, and only when it is empty.
+            with contextlib.suppress(OSError):
+                path.parent.rmdir()
 
     store.delete_job(job.id)
     logger.info(

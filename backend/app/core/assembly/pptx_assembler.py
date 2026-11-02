@@ -20,6 +20,7 @@ from io import BytesIO
 from math import ceil
 from typing import Any
 
+from PIL import Image
 from pptx import Presentation
 from pptx.oxml.ns import qn
 from pptx.presentation import Presentation as PresentationType
@@ -29,7 +30,7 @@ from pptx.util import Inches, Pt
 
 from app.core.layout import layout_graph
 from app.core.render.pptx_shapes import add_diagram_to_slide, set_vertical_align
-from app.core.rich_text import markup_runs
+from app.core.rich_text import flatten_title, markup_runs
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
@@ -45,6 +46,10 @@ _LINE_H_IN = 0.28
 _CHARS_PER_LINE = 90
 _ROW_H_IN = 0.32
 _FONT_SIZE = Pt(12)
+_SLIDE_W_IN = 10.0
+_PICTURE_MAX_W_IN = 9.0
+_PICTURE_MAX_H_IN = 6.5
+_PICTURE_TOP_IN = 0.5
 
 
 class _SlideCursor:
@@ -221,11 +226,28 @@ def _add_vision_element(
             item.element.id,
             result.error or "degenerate content",
         )
-        slide.shapes.add_picture(
-            BytesIO(image), Inches(2.5), Inches(0.5), height=Inches(6.0)
-        )
+        _add_fitted_picture(slide, image)
     # Content after a diagram/image starts on a fresh slide.
     cursor.slide = None
+
+
+def _add_fitted_picture(slide: Slide, image: bytes) -> None:
+    """Place the picture centred, inside the slide, keeping its proportions."""
+    try:
+        with Image.open(BytesIO(image)) as img:
+            width_px, height_px = img.size
+    except OSError:
+        width_px, height_px = 3, 4
+    aspect = width_px / height_px if width_px > 0 and height_px > 0 else 0.75
+    height_in = min(_PICTURE_MAX_H_IN, _PICTURE_MAX_W_IN / aspect)
+    width_in = height_in * aspect
+    slide.shapes.add_picture(
+        BytesIO(image),
+        Inches((_SLIDE_W_IN - width_in) / 2),
+        Inches(_PICTURE_TOP_IN),
+        width=Inches(width_in),
+        height=Inches(height_in),
+    )
 
 
 _NO_STYLE_NO_GRID_GUID = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"
@@ -272,7 +294,9 @@ def _remove_pptx_table_style(table: Any) -> None:
 
 def _add_heading(cursor: _SlideCursor, heading: str) -> None:
     """Append a plain heading text box directly above a text-content table."""
-    height_in = _LINE_H_IN + 0.06
+    heading = flatten_title(heading)
+    lines = max(1, ceil(len(heading) / _CHARS_PER_LINE))
+    height_in = lines * _LINE_H_IN + 0.06
     slide = cursor.fit(height_in)
     box = slide.shapes.add_textbox(
         Inches(_MARGIN_IN),

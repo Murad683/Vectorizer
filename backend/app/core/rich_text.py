@@ -38,6 +38,16 @@ def markup_runs(text: str) -> list[Run]:
     return [r for r in runs if r[0]]
 
 
+def flatten_title(text: str) -> str:
+    """Join a title the scan wrapped over several lines into one flowing line.
+
+    The model keeps the printed line breaks ("...üçün\\nboşluqların..."); Word
+    would show a hard break mid-sentence and PowerPoint ignores the raw
+    newline. Runs of whitespace (newlines included) become one space.
+    """
+    return " ".join(text.split())
+
+
 def plain(text: str) -> str:
     """Text as it reads with the markup removed (``X_{1}`` -> ``X1``)."""
     return "".join(t for t, _ in markup_runs(text))

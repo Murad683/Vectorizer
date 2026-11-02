@@ -107,8 +107,8 @@ One-time setup:
 
 1. Key pair on your own computer (PowerShell); send ONLY the `.pub` line to whoever installs it:
    ```
-   ssh-keygen -t ed25519 -f "$env:USERPROFILE\.sshectorizer_ci" -N '""' -C github-actions-vectorizer
-   Get-Content "$env:USERPROFILE\.sshectorizer_ci.pub"
+   ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\vectorizer_ci" -N '""' -C github-actions-vectorizer
+   Get-Content "$env:USERPROFILE\.ssh\vectorizer_ci.pub"
    ```
 2. Server (root): install the script and the key line (never edit `authorized_keys`):
    ```

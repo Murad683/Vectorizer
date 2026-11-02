@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.core.assembly import assemble_docx, assemble_pptx
 from app.core.assembly.page_blocks import FlowUnit, crop_figure, group_blocks
 from app.core.classifier import classify_elements
+from app.core.diagram_detect import DetectedShape, Detection
 from app.core.ingestion.image_extractor import ImageExtractor
 from app.core.vision import gemini_provider
 from app.core.vision.base import VisionProvider
@@ -285,6 +286,145 @@ class TestPromptAndProvider:
         assert provider._client.models.generate_content.call_count == 2
         assert result.page is not None
         assert len(result.page.blocks[0].diagram.edges) == 3  # type: ignore[union-attr]
+
+    @staticmethod
+    def _chart_answer(title: str | None) -> dict[str, Any]:
+        def node(i: int, kind: str, text: str, y: int) -> dict[str, Any]:
+            return {
+                "id": f"n{i}",
+                "shape_type": kind,
+                "text": text,
+                "box_2d": [y, 300, y + 40, 700],
+            }
+
+        return {
+            "content_type": "diagram",
+            "diagram": {
+                "nodes": [
+                    node(1, "terminator", "Başlanğıc", 120),
+                    node(2, "process", "a = 1", 220),
+                    node(3, "process", "b = 2", 320),
+                    node(4, "terminator", "Son", 420),
+                ],
+                "edges": [
+                    {"source_id": "n1", "target_id": "n2"},
+                    {"source_id": "n2", "target_id": "n3"},
+                    {"source_id": "n3", "target_id": "n4"},
+                ],
+                "title": title,
+                "title_below": True,
+            },
+            "text_content": None,
+        }
+
+    def _detector(self, monkeypatch: pytest.MonkeyPatch, shapes: int) -> None:
+        monkeypatch.setattr(
+            "app.core.vision.gemini_provider.detect",
+            lambda image: Detection(
+                width=900,
+                height=1200,
+                shapes=[DetectedShape(0, 0, 10, 10, 1.0)] * shapes,
+            ),
+        )
+        monkeypatch.setattr(
+            "app.core.vision.gemini_provider.annotate", lambda image, det: b"png"
+        )
+        monkeypatch.setattr(
+            "app.core.vision.gemini_provider.attach_geometry", lambda *a, **k: None
+        )
+
+    def test_a_flowchart_called_a_figure_is_rescued_with_the_old_prompt(
+        self, provider: GeminiVisionProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._detector(monkeypatch, shapes=6)
+        figure = {"kind": "figure", "box_2d": [100, 250, 480, 750]}
+        provider._client.models.generate_content.side_effect = [
+            self._reply(
+                self._page_payload(
+                    [self._text_block("Sual 1. Mətn?", [20, 100, 60, 700]), figure]
+                )
+            ),
+            self._reply(self._chart_answer("Sxem 1. Başlıq")),
+        ]
+        result = provider.analyze_diagram(_PAGE_IMAGE, page=True)
+        assert provider._client.models.generate_content.call_count == 2
+        rescue_prompt = provider._client.models.generate_content.call_args.kwargs[
+            "contents"
+        ][-1]
+        assert "READING ORDER" not in rescue_prompt  # the proven diagram prompt
+        assert result.page is not None
+        kinds = [b.kind for b in result.page.blocks]
+        assert kinds == [BlockKind.TEXT, BlockKind.FLOWCHART, BlockKind.TEXT]
+        chart = result.page.blocks[1]
+        assert chart.diagram is not None and len(chart.diagram.nodes) == 4
+        assert chart.diagram.title is None
+        assert result.page.blocks[2].text == "Sxem 1. Başlıq"  # caption below
+
+    def test_no_rescue_when_few_shapes_or_a_chart_is_already_there(
+        self, provider: GeminiVisionProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._detector(monkeypatch, shapes=2)
+        provider._client.models.generate_content.return_value = self._reply(
+            self._page_payload(
+                [
+                    self._text_block("Sual 1. Mətn?", [20, 100, 60, 700]),
+                    {"kind": "figure", "box_2d": [100, 250, 480, 750]},
+                ]
+            )
+        )
+        provider.analyze_diagram(_PAGE_IMAGE, page=True)
+        assert provider._client.models.generate_content.call_count == 1
+
+    def test_a_doubtful_rescue_leaves_the_page_as_it_was(
+        self, provider: GeminiVisionProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._detector(monkeypatch, shapes=6)
+        bad = self._chart_answer(None)
+        for node in bad["diagram"]["nodes"]:
+            node["text"] = ""  # pattern squares: nothing readable
+        provider._client.models.generate_content.side_effect = [
+            self._reply(
+                self._page_payload(
+                    [
+                        self._text_block("Sual 1.", [20, 100, 60, 700]),
+                        {"kind": "figure", "box_2d": [100, 250, 480, 750]},
+                    ]
+                )
+            ),
+            self._reply(bad),
+        ]
+        result = provider.analyze_diagram(_PAGE_IMAGE, page=True)
+        assert result.page is not None
+        assert [b.kind for b in result.page.blocks] == [
+            BlockKind.TEXT,
+            BlockKind.FIGURE,
+        ]
+
+    def test_an_answer_without_any_text_is_asked_once_more(
+        self, provider: GeminiVisionProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "app.core.vision.gemini_provider.detect", lambda image: None
+        )
+        figure_only = self._page_payload(
+            [{"kind": "figure", "box_2d": [100, 250, 480, 750]}]
+        )
+        with_text = self._page_payload(
+            [self._text_block("Sual 1. Mətn?", [20, 100, 60, 700])]
+        )
+        provider._client.models.generate_content.side_effect = [
+            self._reply(figure_only),
+            self._reply(with_text),
+        ]
+        result = provider.analyze_diagram(_PAGE_IMAGE, page=True)
+        assert provider._client.models.generate_content.call_count == 2
+        assert result.page is not None and result.page.blocks[0].text == "Sual 1. Mətn?"
+
+    def test_a_page_request_gets_a_longer_timeout(
+        self, provider: GeminiVisionProvider
+    ) -> None:
+        assert provider._page_config.http_options.timeout == 120_000
+        assert provider._config.http_options.timeout == 60_000
 
     def test_page_costs_one_request_when_the_chart_is_complete(
         self, provider: GeminiVisionProvider

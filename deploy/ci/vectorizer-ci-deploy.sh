@@ -14,7 +14,10 @@
 # neither the deploy user nor the CI key can change it.
 # Touches only the "vectorizer" compose project; never prunes anything global.
 set -uo pipefail
-umask 077
+# Files git writes into the app folder must stay readable: the containers run
+# as an unprivileged user and build from this folder (a 600 config.py once
+# stopped the backend from starting). Only the dumps are made private.
+umask 022
 
 APP_DIR="${VECTORIZER_APP_DIR:-/opt/vectorizer}"
 PROJECT="vectorizer"
@@ -57,7 +60,7 @@ backup_db() {
   local tag="$1" file
   mkdir -p "$BACKUP_DIR" || return 1
   file="$BACKUP_DIR/pre-deploy-$(date -u +%Y%m%d-%H%M%S)-${tag}.dump"
-  if ! docker exec vectorizer-db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' >"$file"; then
+  if ! (umask 077 && docker exec vectorizer-db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' >"$file"); then
     rm -f "$file"
     return 1
   fi

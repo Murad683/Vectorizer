@@ -43,14 +43,23 @@ class CachedVisionProvider(VisionProvider):
         self._results: dict[str, VisionResult] = {}
         self.calls = 0  # requests that reached the real provider
 
-    def analyze_diagram(self, image: bytes, context: str | None = None) -> VisionResult:
-        """Return the cached result for ``image``, analysing it once."""
-        key = hashlib.sha256(image).hexdigest()
+    def analyze_diagram(
+        self, image: bytes, context: str | None = None, page: bool = False
+    ) -> VisionResult:
+        """Return the cached result for ``image``, analysing it once.
+
+        The same picture read as a whole page and as a single diagram are two
+        different questions, so the page flag is part of the key.
+        """
+        key = hashlib.sha256(image).hexdigest() + (":page" if page else "")
         cached = self._results.get(key)
         if cached is None:
             if self._inner is None:
                 self._inner = self._factory()
-            cached = self._inner.analyze_diagram(image, context=context)
+            if page:
+                cached = self._inner.analyze_diagram(image, context=context, page=True)
+            else:
+                cached = self._inner.analyze_diagram(image, context=context)
             self._results[key] = cached
             self.calls += 1
         else:

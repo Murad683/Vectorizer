@@ -28,12 +28,23 @@ from pptx.slide import Slide
 from pptx.text.text import _Paragraph
 from pptx.util import Inches, Pt
 
+from app.core.assembly.page_blocks import (
+    MAX_GROUPED_TEXT_IN,
+    FlowUnit,
+    analyze_image,
+    crop_figure,
+    fit_inches,
+    group_blocks,
+    runs_to_dicts,
+    use_page_mode,
+)
 from app.core.layout import layout_graph
 from app.core.render.pptx_shapes import add_diagram_to_slide, set_vertical_align
 from app.core.rich_text import flatten_title, markup_runs
 from app.core.vision import get_vision_provider
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, ElementType
+from app.models.page import BlockKind, PageAnalysis, PageBlock
 from app.models.text_content import TextContent
 
 logger = logging.getLogger(__name__)
@@ -123,11 +134,25 @@ def _emit_runs(paragraph: _Paragraph, runs: list[dict[str, str | None]]) -> None
             run.font._rPr.set("baseline", "30000")
 
 
+def _text_height_in(text: str) -> float:
+    """Estimated height of a wrapped text box."""
+    return max(1, ceil(len(text) / _CHARS_PER_LINE)) * _LINE_H_IN + 0.06
+
+
 def _add_text(cursor: _SlideCursor, item: ClassifiedElement) -> None:
     """Append a text box at the current fill position."""
-    text = str(item.element.raw_content)
-    lines = max(1, ceil(len(text) / _CHARS_PER_LINE))
-    height_in = lines * _LINE_H_IN + 0.06
+    _place_text(
+        cursor, str(item.element.raw_content), item.element.metadata.get("runs")
+    )
+
+
+def _place_text(
+    cursor: _SlideCursor,
+    text: str,
+    runs: list[dict[str, str | None]] | None,
+) -> None:
+    """Append a text box (plain text or runs) at the current fill position."""
+    height_in = _text_height_in(text)
     slide = cursor.fit(height_in)
     box = slide.shapes.add_textbox(
         Inches(_MARGIN_IN),
@@ -138,7 +163,6 @@ def _add_text(cursor: _SlideCursor, item: ClassifiedElement) -> None:
     frame = box.text_frame
     frame.word_wrap = True
     paragraph = frame.paragraphs[0]
-    runs = item.element.metadata.get("runs")
     if runs:
         _emit_runs(paragraph, runs)
     else:
@@ -156,6 +180,13 @@ def _add_table(cursor: _SlideCursor, item: ClassifiedElement) -> None:
         item.element.metadata.get("n_cols")
         or max(len(cells) for cells in cells_per_row)
     )
+    _place_table(cursor, cells_per_row, n_cols)
+
+
+def _place_table(
+    cursor: _SlideCursor, cells_per_row: list[list[str]], n_cols: int
+) -> None:
+    """Append a native table at the current fill position."""
     height_in = len(cells_per_row) * _ROW_H_IN
     slide = cursor.fit(height_in)
     shape = slide.shapes.add_table(
@@ -191,7 +222,11 @@ def _add_vision_element(
     """
     image = item.element.raw_content
     assert isinstance(image, bytes)
-    result = provider.analyze_diagram(image, context=context)
+    result = analyze_image(provider, image, context, use_page_mode(item))
+
+    if result.page is not None:
+        _add_page(cursor, result.page, image)
+        return
 
     if result.text_content is not None and _add_text_content(
         cursor, result.text_content
@@ -248,6 +283,86 @@ def _add_fitted_picture(slide: Slide, image: bytes) -> None:
         width=Inches(width_in),
         height=Inches(height_in),
     )
+
+
+def _block_runs(block: PageBlock) -> list[dict[str, str | None]]:
+    return runs_to_dicts(block.runs or [])
+
+
+def _add_figure(cursor: _SlideCursor, png: bytes) -> None:
+    """A figure cut out of the page, centred, sharing the slide with text."""
+    width_in, height_in = fit_inches(png, _PICTURE_MAX_W_IN, 4.5)
+    slide = cursor.fit(height_in)
+    slide.shapes.add_picture(
+        BytesIO(png),
+        Inches((_SLIDE_W_IN - width_in) / 2),
+        Inches(cursor.y_in),
+        width=Inches(width_in),
+        height=Inches(height_in),
+    )
+    cursor.advance(height_in + 0.1)
+
+
+def _add_flow_unit(cursor: _SlideCursor, unit: FlowUnit) -> None:
+    """A flowchart on its own slide, with its question lines and options.
+
+    The lines above and below stay on the chart's slide while they take at
+    most ``MAX_GROUPED_TEXT_IN``; otherwise they flow on ordinary slides
+    around a slide that holds the chart alone.
+    """
+    assert unit.chart.diagram is not None
+    before_h = sum(_text_height_in(b.text) for b in unit.before)
+    after_h = sum(_text_height_in(b.text) for b in unit.after)
+    grouped = before_h + after_h <= MAX_GROUPED_TEXT_IN
+    if not grouped:
+        for block in unit.before:
+            _place_text(cursor, block.text, _block_runs(block))
+    slide = cursor.new_slide()
+    if grouped:
+        for block in unit.before:
+            _place_text(cursor, block.text, _block_runs(block))
+    top_in = cursor.y_in if unit.before and grouped else 0.2
+    reserve_in = (after_h + 0.1) if grouped else 0.0
+    layouted = layout_graph(unit.chart.diagram)
+    drawn_h = add_diagram_to_slide(
+        layouted,
+        slide,
+        offset_x_emu=Inches(0.5),
+        offset_y_emu=Inches(top_in),
+        max_width_emu=Inches(9),
+        # Grouped lines below the chart must still fit above the slide's text
+        # limit, otherwise they would spill onto a slide of their own.
+        max_height_emu=Inches(
+            max(1.0, (_BOTTOM_LIMIT_IN if grouped else 7.2) - top_in - reserve_in)
+        ),
+    )
+    if grouped:
+        cursor.y_in = top_in + drawn_h / 914400 + 0.1
+        for block in unit.after:
+            _place_text(cursor, block.text, _block_runs(block))
+        cursor.slide = None
+    else:
+        cursor.slide = None
+        for block in unit.after:
+            _place_text(cursor, block.text, _block_runs(block))
+
+
+def _add_page(cursor: _SlideCursor, page: PageAnalysis, image: bytes) -> None:
+    """Write the blocks of a whole page in reading order."""
+    for item in group_blocks(page.blocks):
+        if isinstance(item, FlowUnit):
+            _add_flow_unit(cursor, item)
+        elif item.kind == BlockKind.TEXT:
+            _place_text(cursor, item.text, _block_runs(item))
+        elif item.kind == BlockKind.TABLE and item.rows:
+            n_cols = max(len(row) for row in item.rows)
+            _place_table(
+                cursor, [r + [""] * (n_cols - len(r)) for r in item.rows], n_cols
+            )
+        elif item.kind == BlockKind.FIGURE:
+            png = crop_figure(image, item.box_2d)
+            if png is not None:
+                _add_figure(cursor, png)
 
 
 _NO_STYLE_NO_GRID_GUID = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"

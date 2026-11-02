@@ -47,6 +47,6 @@ class ImageExtractor(Extractor):
                 source_page=1,
                 element_kind=ElementKind.IMAGE,
                 raw_content=raw_bytes,
-                metadata={"image_ext": image_ext},
+                metadata={"image_ext": image_ext, "whole_page": True},
             )
         ]

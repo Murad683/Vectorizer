@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # Reserved: result files (DOCX/PPTX) are never deleted automatically.
     # 0 = off; nothing reads this value yet.
     result_retention_days: int = Field(default=0, ge=0)
+    # Page mode: a photographed/scanned page is read as text + flowchart +
+    # figures instead of one flowchart. False restores the old behaviour.
+    page_mode_enabled: bool = True
     frontend_origin: str = "http://localhost:5173"
     # Dev aid: when set, every vision call saves its image, prompt, raw model
     # output and measured geometry under this directory, so layout/render can

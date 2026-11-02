@@ -78,6 +78,19 @@ curl -s -o /dev/null -w "openapi: %{http_code}\n" http://127.0.0.1:4300/api/open
 curl -s -o /dev/null -w "health: %{http_code}\n" http://127.0.0.1:4300/api/health
 ```
 
+## Page mode
+
+An uploaded image (PNG/JPG) is read as a whole page: the printed text becomes
+editable text in reading order, the flowchart stays editable shapes, and every
+other picture (graphs, pattern matrices, drawn options) is cut out of the image
+and placed in the same spot. Still ONE Gemini request per image. Faint text
+showing through the paper, handwriting and half lines at the image edge are
+dropped by the prompt and by an ink-contrast check in the code.
+
+- Switch off: `PAGE_MODE_ENABLED=false` in `/opt/vectorizer/.env`, then
+  `docker compose -p vectorizer -f docker-compose.prod.yml up -d --no-build backend`.
+- Images embedded in a DOCX/PDF keep the single-diagram behaviour.
+
 ## Own Cloudflare tunnel
 
 The `cloudflared` service reads `TUNNEL_TOKEN` from `/opt/vectorizer/.env`. The

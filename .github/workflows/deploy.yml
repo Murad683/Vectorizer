@@ -102,12 +102,18 @@ jobs:
             -o ServerAliveInterval=30 \
             "$DEPLOY_USER@$DEPLOY_HOST" "$command"
 
-      # A second opinion from outside: the public address, not the server itself.
-      - name: Check the public address
+      # Information only. The server has already checked /api/health and the four
+      # containers; Cloudflare may answer 403 to GitHub's data-centre addresses
+      # (seen live: 403 here, 200 from everywhere else), so this never fails the run.
+      - name: Check the public address (information only)
         if: steps.changes.outputs.skip != 'true' && steps.plan.outputs.request != 'status'
+        continue-on-error: true
         run: |
-          curl -fsS --retry 10 --retry-delay 5 --retry-all-errors -m 15 "$HEALTH_URL"
-          echo
+          if curl -fsS --retry 2 --retry-delay 3 --retry-all-errors -m 15 "$HEALTH_URL"; then
+            echo
+          else
+            echo "::warning::The public address did not answer from GitHub's network (Cloudflare may block data-centre addresses). The server's own health check passed."
+          fi
 
       - name: Remove the key
         if: always()

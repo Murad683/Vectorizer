@@ -1,0 +1,114 @@
+name: Deploy
+
+# Deploys main to the server after CI is green, or on demand.
+# The server side is a forced command (deploy/ci/vectorizer-ci-deploy.sh): the
+# key in the DEPLOY_SSH_KEY secret can only run "deploy <commit>", "rollback"
+# and "status". See DEPLOY.md, "Automatic deploy".
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy = current main, rollback = previous version, status = read-only"
+        type: choice
+        options: [deploy, rollback, status]
+        default: status
+
+# One deploy at a time; a second one waits instead of cancelling the first.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  HEALTH_URL: https://vectorizer.ourneweye.com/api/health
+
+jobs:
+  deploy:
+    # After CI: only a successful run of a push to main. On demand: only main.
+    if: >-
+      (github.event_name == 'workflow_run'
+        && github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.event == 'push')
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Decide what to run
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+          ACTION: ${{ github.event.inputs.action }}
+        run: |
+          if [ "$EVENT" = "workflow_run" ]; then
+            echo "sha=$RUN_SHA" >> "$GITHUB_OUTPUT"
+            echo "request=deploy" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+            echo "request=${ACTION:-status}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A change that touches only Markdown files does not need a new version.
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_run'
+        with:
+          ref: ${{ steps.plan.outputs.sha }}
+          fetch-depth: 2
+
+      - name: Skip documentation-only changes
+        id: changes
+        if: github.event_name == 'workflow_run'
+        run: |
+          other=$(git diff --name-only HEAD^ HEAD | grep -v -E '\.md$' || true)
+          if [ -z "$other" ]; then
+            echo "Only Markdown changed: nothing to deploy."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare the SSH key
+        if: steps.changes.outputs.skip != 'true'
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/ssh/key" "$RUNNER_TEMP/ssh/known_hosts"
+
+      - name: Run on the server
+        if: steps.changes.outputs.skip != 'true'
+        env:
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          REQUEST: ${{ steps.plan.outputs.request }}
+          SHA: ${{ steps.plan.outputs.sha }}
+        run: |
+          if [ "$REQUEST" = "deploy" ]; then command="deploy $SHA"; else command="$REQUEST"; fi
+          echo "Server request: $command"
+          ssh -i "$RUNNER_TEMP/ssh/key" \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+            -o ServerAliveInterval=30 \
+            "$DEPLOY_USER@$DEPLOY_HOST" "$command"
+
+      # A second opinion from outside: the public address, not the server itself.
+      - name: Check the public address
+        if: steps.changes.outputs.skip != 'true' && steps.plan.outputs.request != 'status'
+        run: |
+          curl -fsS --retry 10 --retry-delay 5 --retry-all-errors -m 15 "$HEALTH_URL"
+          echo
+
+      - name: Remove the key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ssh"

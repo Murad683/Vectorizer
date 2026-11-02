@@ -78,6 +78,56 @@ curl -s -o /dev/null -w "openapi: %{http_code}\n" http://127.0.0.1:4300/api/open
 curl -s -o /dev/null -w "health: %{http_code}\n" http://127.0.0.1:4300/api/health
 ```
 
+## Automatic deploy
+
+After a push to `main`, when the CI workflow is green, the **Deploy** workflow
+(`.github/workflows/deploy.yml`) updates the server by itself; it can also be run by
+hand (Actions → Deploy → Run workflow: `status`, `deploy` or `rollback`). A change that
+touches only Markdown files is not deployed.
+
+How it is kept safe:
+
+- The workflow uses its own SSH key. On the server that key is in
+  `~deploy/.ssh/authorized_keys2` with `restrict,command="/usr/local/bin/vectorizer-ci-deploy"`:
+  it can run only that script, no shell, no port forwarding. The other keys on the server are
+  not touched.
+- `/usr/local/bin/vectorizer-ci-deploy` is a **root-owned copy** of `deploy/ci/vectorizer-ci-deploy.sh`
+  (the deploy user and the CI key cannot change it). It accepts only `deploy <40-hex commit>`,
+  `rollback` and `status`; a commit is accepted only if it is on `origin/main`; a lock stops two
+  deploys at once.
+- Before a deploy it takes a database dump (`/opt/vectorizer/backups/pre-deploy-*.dump`, newest 7
+  kept), tags the running images `:rollback`, builds, and waits for `/api/health` and for the four
+  containers to be healthy. If that fails it puts the previous commit and images back by itself
+  and the workflow turns red (GitHub sends its usual e-mail). A schema migration is **not** undone
+  by that; restore the pre-deploy dump by hand if one ever has to be.
+- The workflow runs in the `production` environment (only `main` may use it), so its secrets are
+  never available to pull-request branches.
+
+One-time setup:
+
+1. Key pair on your own computer (PowerShell); send ONLY the `.pub` line to whoever installs it:
+   ```
+   ssh-keygen -t ed25519 -f "$env:USERPROFILE\.sshectorizer_ci" -N '""' -C github-actions-vectorizer
+   Get-Content "$env:USERPROFILE\.sshectorizer_ci.pub"
+   ```
+2. Server (root): install the script and the key line (never edit `authorized_keys`):
+   ```
+   install -m 755 -o root -g root /opt/vectorizer/deploy/ci/vectorizer-ci-deploy.sh /usr/local/bin/vectorizer-ci-deploy
+   install -m 600 -o deploy -g deploy /dev/null /home/deploy/.ssh/authorized_keys2
+   printf '%s
+' 'restrict,command="/usr/local/bin/vectorizer-ci-deploy" <the .pub line>' >> /home/deploy/.ssh/authorized_keys2
+   ```
+3. GitHub → Settings → Environments → **production** (deployment branches: `main` only) with the secrets
+   `DEPLOY_SSH_KEY` (the private key file), `DEPLOY_HOST` (server IP), `DEPLOY_USER` (`deploy`) and
+   `DEPLOY_KNOWN_HOSTS` (the line printed by `ssh-keyscan -t ed25519 <IP>`; its fingerprint must
+   match `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server).
+
+Remove it again: delete `/home/deploy/.ssh/authorized_keys2` and
+`/usr/local/bin/vectorizer-ci-deploy`, delete the four secrets, disable the Deploy workflow.
+Manual `deploy/deploy.sh` keeps working.
+
+Tests without a server: `bash deploy/ci/test-ci-deploy.sh` (also run by CI).
+
 ## Page mode
 
 An uploaded image (PNG/JPG) is read as a whole page: the printed text becomes

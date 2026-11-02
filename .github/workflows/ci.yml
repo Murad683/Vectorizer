@@ -121,3 +121,10 @@ jobs:
           msg="${msg//'%'/'%25'}"
           msg="${msg//$'\n'/'%0A'}"
           echo "::${level} title=pytest result::${msg}"
+
+      # The server-side scripts run against stubs: no server, no Docker needed.
+      - name: Deploy script tests (offline)
+        working-directory: ${{ github.workspace }}
+        run: |
+          bash deploy/ci/test-ci-deploy.sh
+          bash deploy/backup/test-backup.sh

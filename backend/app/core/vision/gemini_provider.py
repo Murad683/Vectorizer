@@ -189,9 +189,12 @@ printed on separate lines, give each printed line its own block (style \
 "title" null and "title_below" false: the question text above or below the \
 chart is its own "text" block. "box_2d" is the box around the whole chart.
 - "figure": any other picture that cannot be written as text: a drawing, \
-graph, plot, pattern matrix, geometric shape, photo, or a picture used as an \
-answer option. "box_2d" is tight around it, including the letters that label \
-its options. Never also copy a figure's inner text into text blocks.
+graph, plot, pattern matrix, geometric shape, photo, a picture used as an \
+answer option, and anything laid out as a diagram rather than running text \
+(for example long-division or column-arithmetic layouts). "box_2d" is tight \
+around it, including the letters that label its options. Never also copy a \
+figure's inner text or labels into text blocks. A flowchart (symbols joined \
+by arrows) is NEVER a figure: it is always kind "flowchart".
 
 Text rules:
 - Preserve every character EXACTLY as printed: Azerbaijani letters (ə, ı, ş, \
@@ -209,8 +212,9 @@ LEFT column first, then the whole RIGHT column.
 faint, washed-out or mirrored text showing through from the back of the \
 paper; handwriting and pen marks; text cut off by the edge of the image (half \
 lines at the border); phone status bars, app toolbars and page counters \
-(e.g. "9/60"); watermarks; running headers and footers; page numbers; \
-content of the neighbouring page. If you are unsure whether something is \
+(e.g. "9/60"); watermarks; running headers and footers; page numbers, \
+including a lone number in a small box at the top of the page; content of \
+the neighbouring page. If you are unsure whether something is \
 printed text or a ghost, skip it.
 
 Flowchart rules (for blocks of kind "flowchart"):
@@ -323,7 +327,8 @@ class GeminiVisionProvider(VisionProvider):
             meta["retry_kept"] = kept
             if kept and retry is not None and retry.page is not None:
                 page, raw_output = retry.page, retry_raw
-        page = filter_page(page, image)
+        if get_settings().ghost_filter_enabled:
+            page = filter_page(page, image)
         for block in page.blocks:
             if block.diagram is not None:
                 attach_geometry(block.diagram, image, detection, marked=marked)

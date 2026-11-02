@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Page mode: a photographed/scanned page is read as text + flowchart +
     # figures instead of one flowchart. False restores the old behaviour.
     page_mode_enabled: bool = True
+    # Second line of defence against ghost text (ink-contrast check). Off: on
+    # real pages the model leaves ghost text out by itself, while the check
+    # dropped real lines when a box was a little off. Needs calibration on
+    # more photographs before it is switched on.
+    ghost_filter_enabled: bool = False
     frontend_origin: str = "http://localhost:5173"
     # Dev aid: when set, every vision call saves its image, prompt, raw model
     # output and measured geometry under this directory, so layout/render can

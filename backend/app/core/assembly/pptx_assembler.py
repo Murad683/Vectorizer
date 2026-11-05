@@ -105,7 +105,10 @@ def assemble_pptx(
 
     for item in classified:
         # A scanned page gets its own slide(s); what follows it starts a new one.
-        is_scan = bool(item.element.metadata.get("whole_page"))
+        is_scan = bool(
+            item.element.metadata.get("whole_page")
+            or item.element.metadata.get("keep_image")
+        )
         if started and (is_scan or after_scan):
             cursor.slide = None
         started, after_scan = True, is_scan
@@ -114,6 +117,11 @@ def assemble_pptx(
             last_text = str(item.element.raw_content)
         elif item.element_type == ElementType.TABLE:
             _add_table(cursor, item)
+        elif item.element_type == ElementType.PICTURE:
+            image = item.element.raw_content
+            assert isinstance(image, bytes)
+            _add_fitted_picture(cursor.new_slide(), image)
+            cursor.slide = None
         elif item.element_type == ElementType.DIAGRAM:
             if provider is None:
                 provider = get_vision_provider()

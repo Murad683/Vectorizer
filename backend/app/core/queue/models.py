@@ -4,6 +4,8 @@ State machine
 -------------
 ::
 
+    AWAITING_SELECTION ──→ PENDING   (scanned PDF: the owner picked the pages)
+    AWAITING_SELECTION ──→ FAILED    (nobody picked in time)
     PENDING ──→ PROCESSING ──→ COMPLETED
        ↑              │
        └──────────────┘  (retry: count < max)
@@ -28,6 +30,7 @@ from pydantic import BaseModel, Field
 class JobStatus(str, Enum):
     """Allowed job states (string enum for JSON serialisation)."""
 
+    AWAITING_SELECTION = "awaiting_selection"  # a scanned PDF: pages to be chosen
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -48,5 +51,9 @@ class Job(BaseModel):
     retry_count: int = Field(default=0)
     max_retries: int = Field(default=2)
     vision_calls: int = Field(default=0)
+    page_count: int | None = None
+    # "1-3,7"; None = no selection (everything), "" = no page chosen.
+    selected_pages: str | None = None
+    keep_unselected: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

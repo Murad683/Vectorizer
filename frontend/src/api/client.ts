@@ -98,12 +98,34 @@ export interface LoginResponse {
 
 export interface JobResponse {
   job_id: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'awaiting_selection' | 'pending' | 'processing' | 'completed' | 'failed';
   input_filename: string;
   created_at: string;
   updated_at: string;
   available_formats?: string[];
   error_message?: string;
+  /** Only while the job waits for its page selection. */
+  page_count?: number;
+}
+
+export type PageKind = 'scan' | 'text' | 'blank';
+
+export interface PageItem {
+  n: number;
+  kind: PageKind;
+  /** A small JPEG as a data URL (an <img> cannot send the auth header). */
+  thumb: string;
+}
+
+export interface PagesResponse {
+  page_count: number;
+  pages: PageItem[];
+}
+
+export interface StartBody {
+  pages: number[];
+  keep_unselected: boolean;
+  confirm_empty: boolean;
 }
 
 export interface UserResponse {
@@ -145,10 +167,21 @@ export const api = {
     return request<JobResponse>(`/jobs/${id}`);
   },
 
+  getJobPages(id: string) {
+    return request<PagesResponse>(`/jobs/${id}/pages`);
+  },
+
+  startJob(id: string, body: StartBody) {
+    return request<JobResponse>(`/jobs/${id}/start`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
   uploadFile(file: File) {
     const form = new FormData();
     form.append('file', file);
-    return request<{ job_id: string; status: string }>('/jobs', {
+    return request<{ job_id: string; status: string; page_count?: number }>('/jobs', {
       method: 'POST',
       body: form,
     });

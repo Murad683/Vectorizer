@@ -96,7 +96,10 @@ def assemble_docx(
     for item in classified:
         # A scanned page keeps its own page: it starts on a fresh one, and what
         # follows it does too. Text documents flow as before.
-        is_scan = bool(item.element.metadata.get("whole_page"))
+        is_scan = bool(
+            item.element.metadata.get("whole_page")
+            or item.element.metadata.get("keep_image")
+        )
         if started and (is_scan or after_scan):
             document.add_page_break()  # type: ignore[no-untyped-call]
         started, after_scan = True, is_scan
@@ -105,6 +108,10 @@ def assemble_docx(
             last_text = str(item.element.raw_content)
         elif item.element_type == ElementType.TABLE:
             _add_table(document, item)
+        elif item.element_type == ElementType.PICTURE:
+            image = item.element.raw_content
+            assert isinstance(image, bytes)
+            document.add_picture(BytesIO(image), width=Inches(_picture_width_in(image)))
         elif item.element_type == ElementType.DIAGRAM:
             if provider is None:
                 provider = get_vision_provider()

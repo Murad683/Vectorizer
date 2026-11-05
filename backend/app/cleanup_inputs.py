@@ -11,10 +11,15 @@ Only INPUT files are ever removed. Deleted:
 - an upload with no job row at all (a crashed upload) that old;
 - an empty ``data/jobs/<uuid>`` directory whose job is not waiting or running.
 
+Before that, a scanned PDF still waiting for its page selection after
+``SELECTION_EXPIRY_HOURS`` is marked FAILED (the only job row this script changes);
+its file then follows by the rule above.
+
 Never touched: files of PENDING / PROCESSING jobs (they may still be read, and a
 failed attempt puts a job back to PENDING), result files (DOCX/PPTX), directories
-that still hold files, and the job rows themselves. The only calls that remove
-anything are ``Path.unlink`` and ``Path.rmdir``; there is no recursive delete.
+that still hold files, and the job rows themselves (except the expiry above).
+The only calls that remove anything are ``Path.unlink`` and ``Path.rmdir``;
+there is no recursive delete.
 """
 
 import argparse
@@ -36,7 +41,13 @@ logger = logging.getLogger("app.cleanup_inputs")
 UPLOADS_DIR = Path("data/uploads")
 JOBS_DIR = Path("data/jobs")
 
-_ACTIVE = (JobStatus.PENDING, JobStatus.PROCESSING)
+_ACTIVE = (
+    JobStatus.AWAITING_SELECTION,
+    JobStatus.PENDING,
+    JobStatus.PROCESSING,
+)
+
+_SELECTION_EXPIRED_MESSAGE = "Səhifə seçimi vaxtında edilmədi. Faylı yenidən yükləyin."
 
 
 @dataclass(frozen=True)
@@ -164,6 +175,34 @@ def find_candidates(
     return sorted(found.values(), key=lambda c: (c.kind, str(c.path))), notes
 
 
+def expire_selections(
+    store: JobStore,
+    *,
+    expiry_hours: float,
+    dry_run: bool,
+    now: datetime | None = None,
+) -> int:
+    """Fail jobs that waited for a page selection longer than ``expiry_hours``.
+
+    Their input file is then removed by the normal pass once it is old enough.
+    Returns how many jobs were (or, in a dry run, would be) expired.
+    """
+    now = now or datetime.now(timezone.utc)
+    expired = store.list_awaiting_before(now - timedelta(hours=expiry_hours))
+    for job in expired:
+        age = (now - job.created_at).total_seconds() / 3600
+        if dry_run:
+            logger.info("WOULD EXPIRE selection of job %s (age %.1fh)", job.id, age)
+            continue
+        store.update_job(
+            job.id,
+            status=JobStatus.FAILED,
+            error_message=_SELECTION_EXPIRED_MESSAGE,
+        )
+        logger.info("EXPIRED selection of job %s (age %.1fh)", job.id, age)
+    return len(expired)
+
+
 def run_cleanup(
     store: JobStore,
     *,
@@ -263,6 +302,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     store = JobStore(dsn=settings.database_url)
     try:
+        expire_selections(
+            store, expiry_hours=settings.selection_expiry_hours, dry_run=dry_run
+        )
         result = run_cleanup(
             store, retention_hours=hours, max_deletions=limit, dry_run=dry_run
         )

@@ -11,6 +11,13 @@ export default function StatusBadge({ status }: Props) {
       return <span className={`${base} bg-success/10 text-success`}>{STATUS_LABELS[status]}</span>;
     case 'failed':
       return <span className={`${base} bg-error/10 text-error`}>{STATUS_LABELS[status]}</span>;
+    case 'awaiting_selection':
+      return (
+        <span className={`${base} bg-accent/20 text-ink-secondary`}>
+          <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+          {STATUS_LABELS[status]}
+        </span>
+      );
     case 'processing':
       return (
         <span className={`${base} bg-processing/10 text-processing`}>
@@ -30,6 +37,7 @@ export function StatusDot({ status }: Props) {
     failed: 'bg-error',
     processing: 'bg-processing animate-pulse-slow',
     pending: 'bg-muted',
+    awaiting_selection: 'bg-accent',
   };
   return (
     <span

@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     pdf_scan_coverage: float = Field(default=0.80, gt=0, le=1)
     pdf_min_text_chars: int = Field(default=20, ge=1)
     pdf_scan_dpi: int = Field(default=150, ge=72, le=300)
+    # Page selection: a PDF with scanned pages waits for its owner to pick the
+    # pages to read. False: such a PDF starts at once, as before. A selection
+    # nobody makes expires after this many hours. Pages left out of the result
+    # as plain pictures are rendered at the lower resolution.
+    page_selection_enabled: bool = True
+    selection_expiry_hours: int = Field(default=24, ge=1)
+    pdf_kept_page_dpi: int = Field(default=110, ge=72, le=300)
     # Daily cleanup of uploaded INPUT files (python -m app.cleanup_inputs).
     input_retention_hours: int = Field(default=24, ge=1)
     input_cleanup_max_per_run: int = Field(default=100, ge=1)

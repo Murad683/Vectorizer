@@ -3,13 +3,16 @@ import type { JobResponse } from '../api/client';
 import { api } from '../api/client';
 import { formatDate, downloadJobFile } from '../lib/jobUtils';
 import StatusBadge from './StatusBadge';
+import PageSelection from './PageSelection';
 
 interface Props {
   job: JobResponse;
   onDeleted: () => void;
+  /** Called with the updated job after the page selection was started. */
+  onStarted?: (job: JobResponse) => void;
 }
 
-export default function JobDetail({ job, onDeleted }: Props) {
+export default function JobDetail({ job, onDeleted, onStarted }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -32,6 +35,10 @@ export default function JobDetail({ job, onDeleted }: Props) {
         </div>
         <StatusBadge status={job.status} />
       </div>
+
+      {job.status === 'awaiting_selection' && (
+        <PageSelection job={job} onStarted={started => onStarted?.(started)} />
+      )}
 
       {(job.status === 'pending' || job.status === 'processing') && (
         <div className="flex items-center gap-3 text-sm text-ink-secondary bg-surface border border-border rounded-lg px-4 py-3 mb-6">

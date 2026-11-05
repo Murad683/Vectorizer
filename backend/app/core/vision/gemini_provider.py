@@ -18,6 +18,7 @@ from app.core.vision.budget import VisionBudget, VisionBudgetExceededError
 from app.core.vision.debug_dump import DebugDump
 from app.core.vision.postprocess import (
     attach_geometry,
+    empty_text_blocks,
     filter_page,
     page_topology_problems,
     parse_diagram_graph,
@@ -59,6 +60,16 @@ _PAGE_REQUEST_TIMEOUT_MS = 120_000
 _RESCUE_MIN_SHAPES = 4
 _RESCUE_MIN_LABELLED_NODES = 3
 _RESCUE_OVERLAP = 0.4
+# An answer cut at the token ceiling is the model looping; asking again gives
+# the same loop (seen live: 3 of 3 attempts). With nothing usable to lose, the
+# old single-diagram prompt gets one try when the detector saw at least this
+# many symbols.
+_CUT_RESCUE_MIN_SHAPES = 3
+# A page answer whose text blocks come without any text (seen live: all 14
+# question stems) is asked once more when at least this many blocks, and this
+# share of the text blocks, are empty.
+_EMPTY_MIN = 2
+_EMPTY_SHARE = 0.08
 
 _TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 
@@ -274,6 +285,7 @@ class GeminiVisionProvider(VisionProvider):
             response_mime_type="application/json",
             response_schema=VisionAnalysis,
             http_options=genai_types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
+            max_output_tokens=settings.page_max_output_tokens,
         )
         # Never set a temperature here: measured live, an explicit 0 or 0.3 made
         # the request hit the 504 deadline (3 minutes) where the default answers
@@ -285,8 +297,12 @@ class GeminiVisionProvider(VisionProvider):
             max_output_tokens=settings.page_max_output_tokens,
         )
 
-    def _note_usage(self, response: object, kind: str) -> None:
-        """Log and count the real token use of one request (numbers only)."""
+    def _note_usage(self, response: object, kind: str) -> bool:
+        """Log and count the real token use of one request (numbers only).
+
+        Returns True when the answer was cut at the output token ceiling.
+        """
+        cut = False
         try:
             usage = getattr(response, "usage_metadata", None)
             if usage is not None:
@@ -307,12 +323,14 @@ class GeminiVisionProvider(VisionProvider):
                     )
             for candidate in getattr(response, "candidates", None) or []:
                 if "MAX_TOKENS" in str(getattr(candidate, "finish_reason", "")):
+                    cut = True
                     logger.warning(
                         "Gemini answer cut at the output token ceiling (kind=%s)",
                         kind,
                     )
         except Exception:  # noqa: BLE001 - logging must never break a request
             logger.debug("Could not read token usage", exc_info=True)
+        return cut
 
     def _consume_budget(self) -> None:
         """Count one Gemini request against the job's ceiling, if there is one."""
@@ -381,6 +399,82 @@ class GeminiVisionProvider(VisionProvider):
         if analysis is None or analysis.content_type != ContentType.PAGE:
             return None, raw
         return analysis, raw
+
+    @staticmethod
+    def _too_empty(empty: int, total: int) -> bool:
+        return empty >= _EMPTY_MIN and total > 0 and empty / total >= _EMPTY_SHARE
+
+    def _check_complete(
+        self,
+        analysis: VisionAnalysis,
+        raw_output: str,
+        contents: list[str | genai_types.Part],
+        config: genai_types.GenerateContentConfig,
+        meta: dict[str, object],
+    ) -> tuple[VisionAnalysis, str]:
+        """Ask once more when many text blocks came back without any text.
+
+        ``clean_page`` drops such blocks, so without this check the question
+        stems of a page can vanish without a trace. The better of the two
+        answers is kept; if it is still incomplete a warning is logged.
+        """
+        empty, total = empty_text_blocks(raw_output)
+        meta["empty_text"] = [empty, total]
+        if not self._too_empty(empty, total):
+            return analysis, raw_output
+        logger.warning(
+            "Page answer has %d of %d text blocks without text; asking again",
+            empty,
+            total,
+        )
+        again, again_raw = self._ask_again(contents, config)
+        if again is not None and again.page is not None:
+            again_empty, again_total = empty_text_blocks(again_raw)
+            if again_empty < empty:
+                analysis, raw_output = again, again_raw
+                empty, total = again_empty, again_total
+                meta["empty_text"] = [empty, total, "repeat"]
+        if self._too_empty(empty, total):
+            logger.warning("page_incomplete empty=%d of %d", empty, total)
+            meta["page_incomplete"] = True
+        return analysis, raw_output
+
+    def _after_cut(
+        self,
+        page: bool,
+        image: bytes,
+        detection: Detection | None,
+        marked: bool,
+        contents: list[str | genai_types.Part],
+        dump: DebugDump,
+        raw_output: str,
+    ) -> VisionResult:
+        """An answer cut at the token ceiling: one old-prompt try, else give up.
+
+        The assemblers then embed the original image, as for any unusable answer.
+        """
+        if (
+            page
+            and detection is not None
+            and len(detection.shapes) >= _CUT_RESCUE_MIN_SHAPES
+        ):
+            rescued = self._rescue_flowchart(PageAnalysis(blocks=[]), contents, marked)
+            if rescued.blocks:
+                return self._finish_page(
+                    VisionAnalysis(content_type=ContentType.PAGE, page=rescued),
+                    raw_output,
+                    image,
+                    detection,
+                    marked,
+                    contents,
+                    self._page_config,
+                    dump,
+                    {"model": self._model_name, "cut_rescue": True},
+                )
+        return VisionResult(
+            raw_model_output=raw_output,
+            error="Model answer was cut at the output token ceiling.",
+        )
 
     def _rescue_flowchart(
         self,
@@ -584,6 +678,7 @@ class GeminiVisionProvider(VisionProvider):
         last_error: Exception | None = None
         raw_output = ""
         analysis: VisionAnalysis | None = None
+        cut_off = False
         for attempt in range(1 + _MAX_RETRIES):
             try:
                 self._consume_budget()
@@ -594,10 +689,14 @@ class GeminiVisionProvider(VisionProvider):
                     contents=contents,  # type: ignore[arg-type]
                     config=config,
                 )
-                self._note_usage(response, "page" if page else "image")
+                cut_off = self._note_usage(response, "page" if page else "image")
                 raw_output = response.text or ""
                 analysis = parse_vision_analysis(raw_output)
                 if analysis is not None:
+                    break
+                if cut_off:
+                    # The model is looping: the same request loops again.
+                    logger.warning("Answer cut at the ceiling; not asking again")
                     break
                 # Invalid/incomplete JSON is treated like a transient
                 # failure: the model often produces a complete payload on a
@@ -641,9 +740,17 @@ class GeminiVisionProvider(VisionProvider):
                 ),
             )
 
+        if analysis is None and cut_off:
+            return self._after_cut(
+                page, image, detection, marked is not None, contents, dump, raw_output
+            )
+        assert analysis is not None
         dump.text("response.json", raw_output)
         meta: dict[str, object] = {"model": self._model_name, "context": context}
         if analysis.content_type == ContentType.PAGE and analysis.page is not None:
+            analysis, raw_output = self._check_complete(
+                analysis, raw_output, contents, config, meta
+            )
             return self._finish_page(
                 analysis,
                 raw_output,

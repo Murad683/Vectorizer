@@ -309,3 +309,20 @@ The per-job request ceiling of a PDF is `max(MAX_VISION_CALLS_PER_JOB, pages * V
 + VISION_CALLS_EXTRA)` (defaults 25, 2, 5: 50 pages -> 105). Images and DOCX keep
 `MAX_VISION_CALLS_PER_JOB`. `PAGE_MODE_ENABLED=false` makes scans fall back to the old
 one-image-one-flowchart reading. Check what a PDF cost with `python -m app.usage_report`.
+
+## Page answer checks
+
+The model's page answer is checked before it is used (jurnal lines in `docker logs`):
+
+- **Two pages in one photo** (an open book): when a clear empty strip separates the blocks into a
+  left and a right page, the left page is written first (the model answers the right page first).
+- **Text blocks without text:** when at least 2 blocks and 8 % of the text blocks come back with
+  no text, the page is asked once more and the better answer is kept; a still incomplete answer is
+  logged as `page_incomplete empty=N of M` (numbers only). Count them with
+  `docker logs vectorizer-backend | grep page_incomplete`.
+- **Answer cut at the token ceiling** (`Gemini answer cut at the output token ceiling`): the model
+  is looping, so the request is not repeated; with 3 or more detected symbols the old
+  one-diagram prompt gets one try, otherwise the original image is embedded. The ceiling
+  (`PAGE_MAX_OUTPUT_TOKENS`) now also covers that old prompt.
+- Figures are cut with padding that stops at the neighbouring text; `^{2}` / `_{n}` written into
+  a plain text run become real superscripts / subscripts.

@@ -24,6 +24,7 @@ from app.core.assembly.page_blocks import (
     analyze_image,
     crop_figure,
     fit_inches,
+    neighbour_boxes,
     runs_to_dicts,
     use_page_mode,
 )
@@ -272,7 +273,7 @@ def _add_page(document: Document, page: PageAnalysis, image: bytes) -> None:
             )
             _flow_text_around(document)
         elif block.kind == BlockKind.FIGURE:
-            png = crop_figure(image, block.box_2d)
+            png = crop_figure(image, block.box_2d, neighbour_boxes(blocks, block))
             if png is None:
                 continue
             width_in, _ = fit_inches(png, _content_width_in(document), 8.0)

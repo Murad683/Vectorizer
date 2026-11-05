@@ -35,6 +35,7 @@ from app.core.assembly.page_blocks import (
     crop_figure,
     fit_inches,
     group_blocks,
+    neighbour_boxes,
     runs_to_dicts,
     use_page_mode,
 )
@@ -379,7 +380,7 @@ def _add_page(cursor: _SlideCursor, page: PageAnalysis, image: bytes) -> None:
                 plain=True,
             )
         elif item.kind == BlockKind.FIGURE:
-            png = crop_figure(image, item.box_2d)
+            png = crop_figure(image, item.box_2d, neighbour_boxes(page.blocks, item))
             if png is not None:
                 _add_figure(cursor, png)
 

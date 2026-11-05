@@ -8,11 +8,13 @@ source image here, so the page costs no extra vision call.
 import io
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from PIL import Image
 
 from app.config import get_settings
+from app.core.rich_text import markup_runs
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, VisionResult
 from app.models.page import BlockKind, PageBlock, TextStyle
@@ -49,32 +51,90 @@ def analyze_image(
     return provider.analyze_diagram(image, context=context)
 
 
+_VERT = {"sub": "subscript", "sup": "superscript"}
+
+
 def runs_to_dicts(runs: list[TextRun]) -> list[dict[str, str | None]]:
-    """Convert page runs to the run-dict convention of the assemblers."""
+    """Convert page runs to the run-dict convention of the assemblers.
+
+    The model sometimes writes ``(n!)^{2}`` or ``P_{n}`` into a plain run
+    instead of using the sub/superscript flags; that markup becomes the real
+    sub/superscript, as in titles.
+    """
+    out: list[dict[str, str | None]] = []
+    for run in runs:
+        text = run.text.replace("\r", "").replace("\n", " ")
+        if not text:
+            continue
+        flag = (
+            "subscript" if run.subscript else "superscript" if run.superscript else None
+        )
+        if flag is not None:
+            out.append({"text": text, "vert_align": flag})
+            continue
+        out.extend(
+            {"text": chunk, "vert_align": _VERT.get(vert or "")}
+            for chunk, vert in markup_runs(text)
+        )
+    return out
+
+
+def neighbour_boxes(blocks: list[PageBlock], block: PageBlock) -> list[list[int]]:
+    """Boxes of the other text/table blocks: what a figure crop must not swallow."""
     return [
-        {
-            "text": run.text.replace("\r", "").replace("\n", " "),
-            "vert_align": (
-                "subscript"
-                if run.subscript
-                else "superscript" if run.superscript else None
-            ),
-        }
-        for run in runs
-        if run.text
+        b.box_2d
+        for b in blocks
+        if b is not block
+        and b.box_2d is not None
+        and b.kind in (BlockKind.TEXT, BlockKind.TABLE)
     ]
 
 
-def crop_figure(image: bytes, box_2d: list[int] | None) -> bytes | None:
-    """Cut a figure out of the page image (PNG bytes), or None if impossible."""
+def _overlap(a0: int, a1: int, b0: int, b1: int) -> float:
+    """Length of the common part of two intervals."""
+    return max(0, min(a1, b1) - max(a0, b0))
+
+
+def _padding(box: list[int], others: Sequence[list[int]]) -> tuple[int, int, int, int]:
+    """(top, left, bottom, right) padding: ``_CROP_PAD``, but never into a neighbour.
+
+    The model's boxes are a little off, so the crop is cut wider than the box;
+    on a side where a text block lies right next to the figure the padding is
+    only as wide as the gap, otherwise a line of that text lands in the picture.
+    """
+    ymin, xmin, ymax, xmax = box
+    top = left = bottom = right = _CROP_PAD
+    for oy0, ox0, oy1, ox1 in others:
+        wide = _overlap(xmin, xmax, ox0, ox1) >= 0.3 * min(xmax - xmin, ox1 - ox0)
+        tall = _overlap(ymin, ymax, oy0, oy1) >= 0.3 * min(ymax - ymin, oy1 - oy0)
+        if wide and oy1 <= ymin:
+            top = min(top, ymin - oy1)
+        elif wide and oy0 >= ymax:
+            bottom = min(bottom, oy0 - ymax)
+        if tall and ox1 <= xmin:
+            left = min(left, xmin - ox1)
+        elif tall and ox0 >= xmax:
+            right = min(right, ox0 - xmax)
+    return top, left, bottom, right
+
+
+def crop_figure(
+    image: bytes, box_2d: list[int] | None, others: Sequence[list[int]] = ()
+) -> bytes | None:
+    """Cut a figure out of the page image (PNG bytes), or None if impossible.
+
+    ``others`` are the boxes of neighbouring text blocks (see ``neighbour_boxes``);
+    the padding around the figure stops at them.
+    """
     if box_2d is None or len(box_2d) != 4:
         return None
     try:
         with Image.open(io.BytesIO(image)) as img:
             width, height = img.size
             ymin, xmin, ymax, xmax = box_2d
-            ymin, xmin = max(0, ymin - _CROP_PAD), max(0, xmin - _CROP_PAD)
-            ymax, xmax = min(1000, ymax + _CROP_PAD), min(1000, xmax + _CROP_PAD)
+            pad_top, pad_left, pad_bottom, pad_right = _padding(box_2d, others)
+            ymin, xmin = max(0, ymin - pad_top), max(0, xmin - pad_left)
+            ymax, xmax = min(1000, ymax + pad_bottom), min(1000, xmax + pad_right)
             left = int(xmin / 1000 * width)
             top = int(ymin / 1000 * height)
             right = min(width, max(left + 1, int(xmax / 1000 * width)))

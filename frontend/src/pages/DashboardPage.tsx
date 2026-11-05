@@ -86,6 +86,13 @@ export default function DashboardPage({ initialJobId }: Props) {
     fetchSidebar();
   }
 
+  // The page selection was started: show the queued job at once instead of
+  // waiting for the next poll.
+  function handleStarted(job: JobResponse) {
+    setSelectedJob(job);
+    fetchSidebar();
+  }
+
   // Sidebar entries don't call the API themselves — this does the delete
   // and the post-delete cleanup (deselect if it was open, refresh list).
   async function handleDeleteFromSidebar(jobId: string) {
@@ -192,7 +199,11 @@ export default function DashboardPage({ initialJobId }: Props) {
         <main className="flex-1 overflow-y-auto bg-canvas">
           {selectedJob ? (
             <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
-              <JobDetail job={selectedJob} onDeleted={handleJobDeletedInPanel} />
+              <JobDetail
+                job={selectedJob}
+                onDeleted={handleJobDeletedInPanel}
+                onStarted={handleStarted}
+              />
             </div>
           ) : (
             // Home/empty state only — vertically centered so the greeting +

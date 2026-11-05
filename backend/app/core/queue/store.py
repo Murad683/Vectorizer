@@ -41,6 +41,9 @@ def _row_to_job(row: DictRow) -> Job:
         retry_count=row["retry_count"],
         max_retries=row["max_retries"],
         vision_calls=row["vision_calls"],
+        page_count=row["page_count"],
+        selected_pages=row["selected_pages"],
+        keep_unselected=row["keep_unselected"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -64,23 +67,26 @@ class JobStore:
         input_filename: str,
         input_path: str,
         owner_user_id: UUID | None = None,
+        status: JobStatus = JobStatus.PENDING,
+        page_count: int | None = None,
     ) -> Job:
-        """Insert a new PENDING job and return it."""
+        """Insert a new job (PENDING unless told otherwise) and return it."""
         now = datetime.now(timezone.utc)
         row = self._conn.execute(
             """
             INSERT INTO jobs
                 (id, status, owner_user_id, input_filename, input_path,
-                 retry_count, max_retries, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, 0, 2, %s, %s)
+                 retry_count, max_retries, page_count, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, 0, 2, %s, %s, %s)
             RETURNING *
             """,
             (
                 job_id,
-                JobStatus.PENDING.value,
+                status.value,
                 owner_user_id,
                 input_filename,
                 input_path,
+                page_count,
                 now,
                 now,
             ),
@@ -105,14 +111,31 @@ class JobStore:
         ).fetchall()
         return [_row_to_job(r) for r in rows]
 
+    def list_awaiting_before(self, cutoff: datetime) -> list[Job]:
+        """Return AWAITING_SELECTION jobs created before ``cutoff``."""
+        rows = self._conn.execute(
+            "SELECT * FROM jobs WHERE status = %s AND created_at < %s "
+            "ORDER BY created_at",
+            (JobStatus.AWAITING_SELECTION.value, cutoff),
+        ).fetchall()
+        return [_row_to_job(r) for r in rows]
+
     def count_active_jobs(self, owner_user_id: UUID) -> int:
-        """Return how many of the user's jobs are PENDING or PROCESSING."""
+        """Return how many of the user's jobs wait for pages, wait or run.
+
+        A job waiting for its page selection counts: it holds an uploaded file
+        and will become a real job, so it stays inside the same allowance.
+        """
         row = self._conn.execute(
             "SELECT COUNT(*) AS c FROM jobs "
             "WHERE owner_user_id = %s AND status = ANY(%s)",
             (
                 owner_user_id,
-                [JobStatus.PENDING.value, JobStatus.PROCESSING.value],
+                [
+                    JobStatus.AWAITING_SELECTION.value,
+                    JobStatus.PENDING.value,
+                    JobStatus.PROCESSING.value,
+                ],
             ),
         ).fetchone()
         assert row is not None
@@ -175,6 +198,32 @@ class JobStore:
             "SELECT * FROM job_usage WHERE created_at >= %s ORDER BY created_at",
             (since,),
         ).fetchall()
+
+    def start_selected_job(
+        self, job_id: UUID, selected_pages: str, keep_unselected: bool
+    ) -> Job | None:
+        """AWAITING_SELECTION -> PENDING with the chosen pages; None if not waiting.
+
+        One statement, so two clicks on "start" cannot both succeed.
+        """
+        row = self._conn.execute(
+            """
+            UPDATE jobs
+            SET status = %s, selected_pages = %s, keep_unselected = %s,
+                updated_at = %s
+            WHERE id = %s AND status = %s
+            RETURNING *
+            """,
+            (
+                JobStatus.PENDING.value,
+                selected_pages,
+                keep_unselected,
+                datetime.now(timezone.utc),
+                job_id,
+                JobStatus.AWAITING_SELECTION.value,
+            ),
+        ).fetchone()
+        return _row_to_job(row) if row is not None else None
 
     def get_job(self, job_id: UUID) -> Job | None:
         """Return the job with the given id, or None."""

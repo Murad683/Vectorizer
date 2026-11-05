@@ -326,3 +326,24 @@ The model's page answer is checked before it is used (jurnal lines in `docker lo
   (`PAGE_MAX_OUTPUT_TOKENS`) now also covers that old prompt.
 - Figures are cut with padding that stops at the neighbouring text; `^{2}` / `_{n}` written into
   a plain text run become real superscripts / subscripts.
+
+## Page selection (scanned PDFs)
+
+A PDF of 2+ pages with at least one scanned page does not start at once. It gets the status
+`awaiting_selection` and the owner sees small pictures of the pages (scan / text / blank) to pick
+from; everything is ticked except blank pages. `POST /jobs/{id}/start` records the choice and queues
+the job; `GET /jobs/{id}/pages` returns the pictures.
+
+- Chosen pages are read as before (scans by Gemini, text pages directly). The others stay in the
+  result as plain full-page pictures (`keep_image`, rendered at `PDF_KEPT_PAGE_DPI`, 110, no Gemini
+  request), or are left out when the owner turns that option off. Blank pages that were not chosen
+  are always left out. The result is always in page order.
+- Choosing no page needs a confirmation (everything then stays a picture).
+- Text-layer PDFs, Word and images are not affected: they start at once.
+- A waiting job counts as active (the 3-jobs allowance). Nobody picking within
+  `SELECTION_EXPIRY_HOURS` (24) fails the job ("Səhifə seçimi vaxtında edilmədi...") in the nightly
+  cleanup run, which then removes the file.
+- The request ceiling and `job_usage.pages` follow the chosen pages.
+- Switch: `PAGE_SELECTION_ENABLED=false` in `/opt/vectorizer/.env` (append, then recreate the backend)
+  makes scanned PDFs start at once again. Jobs already waiting would have to be started or deleted.
+- Migration 0005 adds `page_count`, `selected_pages`, `keep_unselected` to `jobs`.

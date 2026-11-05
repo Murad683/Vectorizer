@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 Rule = Callable[[ExtractedElement], ElementType | None]
 
 
+def rule_kept_image(element: ExtractedElement) -> ElementType | None:
+    """A page the user did not choose stays a plain picture (no vision request)."""
+    if element.element_kind == ElementKind.IMAGE and element.metadata.get("keep_image"):
+        return ElementType.PICTURE
+    return None
+
+
 def rule_image_is_diagram(element: ExtractedElement) -> ElementType | None:
     """Any image element needs vision processing."""
     if element.element_kind == ElementKind.IMAGE:
@@ -47,6 +54,7 @@ def rule_plain_text(element: ExtractedElement) -> ElementType | None:
 
 
 DEFAULT_RULES: list[Rule] = [
+    rule_kept_image,
     rule_image_is_diagram,
     rule_table_text,
     rule_plain_text,

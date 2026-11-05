@@ -2,11 +2,31 @@ import { api } from '../api/client';
 import type { JobResponse } from '../api/client';
 
 export const STATUS_LABELS: Record<string, string> = {
+  awaiting_selection: 'Seçim gözləyir',
   pending: 'Gözləyir',
   processing: 'Emal olunur',
   completed: 'Hazırdır',
   failed: 'Xəta',
 };
+
+/**
+ * Reads a page list such as "1-5, 8" into sorted, unique page numbers within
+ * 1..max. Returns null when the text is not a valid list (or is empty).
+ */
+export function parsePageRange(text: string, max: number): number[] | null {
+  const pages = new Set<number>();
+  for (const raw of text.split(',')) {
+    const part = raw.trim();
+    if (!part) continue;
+    const m = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(part);
+    if (!m) return null;
+    const first = Number(m[1]);
+    const last = m[2] === undefined ? first : Number(m[2]);
+    if (first < 1 || last < first || last > max) return null;
+    for (let n = first; n <= last; n++) pages.add(n);
+  }
+  return pages.size ? [...pages].sort((a, b) => a - b) : null;
+}
 
 export function formatDate(iso: string): string {
   const d = new Date(iso);

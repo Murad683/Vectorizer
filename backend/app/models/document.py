@@ -24,6 +24,7 @@ class ElementType(str, Enum):
     DIAGRAM = "diagram"  # needs vision processing
     TEXT = "text"  # direct copy
     TABLE = "table"  # direct copy, formatting preserved
+    PICTURE = "picture"  # a page kept as a plain picture, no vision request
 
 
 class BoundingBox(BaseModel):

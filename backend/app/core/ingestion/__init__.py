@@ -5,7 +5,16 @@ from pathlib import Path
 from app.core.ingestion.base import Extractor
 from app.core.ingestion.docx_extractor import DocxExtractor
 from app.core.ingestion.image_extractor import ImageExtractor
-from app.core.ingestion.pdf_extractor import PdfExtractor, count_pdf_pages
+from app.core.ingestion.pdf_extractor import (
+    PageInfo,
+    PageSelection,
+    PdfExtractor,
+    classify_pages,
+    count_pdf_pages,
+    format_page_list,
+    parse_page_list,
+    render_thumbnails,
+)
 
 _EXTRACTORS: dict[str, type[Extractor]] = {
     ".pdf": PdfExtractor,
@@ -16,8 +25,10 @@ _EXTRACTORS: dict[str, type[Extractor]] = {
 }
 
 
-def get_extractor(file_path: Path) -> Extractor:
+def get_extractor(file_path: Path, selection: PageSelection | None = None) -> Extractor:
     """Return the extractor matching the file extension.
+
+    ``selection`` (the pages a user chose) only applies to PDFs.
 
     Raises:
         ValueError: if the extension has no registered extractor.
@@ -28,6 +39,8 @@ def get_extractor(file_path: Path) -> Extractor:
         raise ValueError(
             f"Unsupported file type '{file_path.suffix}'. Supported: {supported}"
         )
+    if extractor_cls is PdfExtractor:
+        return PdfExtractor(selection)
     return extractor_cls()
 
 
@@ -35,7 +48,13 @@ __all__ = [
     "DocxExtractor",
     "Extractor",
     "ImageExtractor",
+    "PageInfo",
+    "PageSelection",
     "PdfExtractor",
+    "classify_pages",
     "count_pdf_pages",
+    "format_page_list",
     "get_extractor",
+    "parse_page_list",
+    "render_thumbnails",
 ]

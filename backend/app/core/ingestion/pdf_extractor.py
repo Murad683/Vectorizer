@@ -15,7 +15,9 @@ Every page is first sorted into one of three kinds:
 """
 
 import logging
-from collections.abc import Collection, Sequence
+import re
+from collections.abc import Collection, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +47,9 @@ _MIN_COLUMN_BLOCKS = 3
 # Longest side of a rendered scan, in pixels (keeps huge sheets reasonable).
 _MAX_RENDER_PX = 3000
 _JPEG_QUALITY = 85
+_KEPT_JPEG_QUALITY = 75
+_THUMB_DPI = 40
+_THUMB_QUALITY = 60
 # Blocks of one stream that go up by more than this (points) are out of order.
 _ORDER_SLACK_PT = 3.0
 _MAX_DISORDER = 0.05
@@ -58,6 +63,66 @@ def count_pdf_pages(data: bytes) -> int | None:
     except Exception:  # noqa: BLE001 - a broken PDF fails later in the worker
         logger.warning("Could not read the page count of an uploaded PDF")
         return None
+
+
+@dataclass(frozen=True)
+class PageSelection:
+    """The pages a user chose to have read; the others stay pictures or go.
+
+    ``selected`` are 1-based page numbers (may be empty: nothing is read).
+    ``keep_unselected`` keeps every other page as a plain full-page picture,
+    in place, so the result is still the whole document.
+    """
+
+    selected: frozenset[int]
+    keep_unselected: bool = True
+
+
+@dataclass(frozen=True)
+class PageInfo:
+    """One page of an uploaded PDF as the selection screen shows it."""
+
+    number: int
+    kind: str  # "scan", "text" or "blank"
+
+
+_PAGE_RANGE = re.compile(r"(\d+)(?:\s*-\s*(\d+))?")
+
+
+def parse_page_list(spec: str) -> list[int]:
+    """``"1-3, 7"`` -> ``[1, 2, 3, 7]`` (sorted, no duplicates).
+
+    Raises ``ValueError`` for anything that is not a list of numbers/ranges.
+    """
+    pages: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        match = _PAGE_RANGE.fullmatch(part)
+        if match is None:
+            raise ValueError(f"Not a page list: {spec!r}")
+        first = int(match.group(1))
+        last = int(match.group(2) or first)
+        if first < 1 or last < first:
+            raise ValueError(f"Not a page range: {part!r}")
+        pages.update(range(first, last + 1))
+    return sorted(pages)
+
+
+def format_page_list(pages: Iterable[int]) -> str:
+    """``[1, 2, 3, 7]`` -> ``"1-3,7"`` (the form stored with a job)."""
+    ordered = sorted(set(pages))
+    parts: list[str] = []
+    index = 0
+    while index < len(ordered):
+        end = index
+        while end + 1 < len(ordered) and ordered[end + 1] == ordered[end] + 1:
+            end += 1
+        first, last = ordered[index], ordered[end]
+        parts.append(str(first) if first == last else f"{first}-{last}")
+        index = end + 1
+    return ",".join(parts)
 
 
 Box = tuple[float, float, float, float]
@@ -137,16 +202,34 @@ class PdfExtractor(Extractor):
     tagged with ``metadata["is_table"] = True`` for the classifier. Scanned
     pages come back as one IMAGE element tagged ``whole_page`` (see the module
     docstring for how a page is classified).
+
+    With a ``PageSelection`` only the chosen pages are read as above; every other
+    page becomes a plain full-page picture (``keep_image``, no vision request) or,
+    when the selection says so, is left out. Blank pages that were not chosen are
+    always left out.
     """
+
+    def __init__(self, selection: PageSelection | None = None) -> None:
+        self._selection = selection
 
     def extract(self, file_path: Path) -> list[ExtractedElement]:
         """Return all elements of the PDF in page order and reading order."""
         elements: list[ExtractedElement] = []
-        counts = {"text": 0, "scan": 0, "blank": 0}
+        counts = {"text": 0, "scan": 0, "blank": 0, "kept": 0, "left out": 0}
         with pymupdf.open(file_path) as doc:
             for page_index, page in enumerate(doc):
                 page_number = page_index + 1
                 kind = self._page_kind(page)
+                if (
+                    self._selection is not None
+                    and page_number not in self._selection.selected
+                ):
+                    if kind != "blank" and self._selection.keep_unselected:
+                        counts["kept"] += 1
+                        elements.append(self._render_page(page, page_number, kept=True))
+                    else:
+                        counts["left out"] += 1
+                    continue
                 page_elements: list[ExtractedElement] | None = None
                 if kind == "text":
                     page_elements = self._text_page(page, page_number)
@@ -162,12 +245,15 @@ class PdfExtractor(Extractor):
                 counts[kind] += 1
                 elements.extend(page_elements or [])
         logger.info(
-            "Extracted %d elements from PDF %s (text pages %d, scans %d, blank %d)",
+            "Extracted %d elements from PDF %s (text pages %d, scans %d, blank %d, "
+            "kept as pictures %d, left out %d)",
             len(elements),
             file_path.name,
             counts["text"],
             counts["scan"],
             counts["blank"],
+            counts["kept"],
+            counts["left out"],
         )
         return elements
 
@@ -222,13 +308,22 @@ class PdfExtractor(Extractor):
         return elements
 
     @staticmethod
-    def _render_page(page: pymupdf.Page, page_number: int) -> ExtractedElement:
-        """Render a scanned page to one JPEG, marked as a whole page."""
-        dpi = get_settings().pdf_scan_dpi
+    def _render_page(
+        page: pymupdf.Page, page_number: int, kept: bool = False
+    ) -> ExtractedElement:
+        """Render a page to one JPEG.
+
+        A scanned page is marked ``whole_page`` (read by the vision model). A
+        ``kept`` page is only a picture for the result (``keep_image``, no vision
+        request), so it is rendered smaller.
+        """
+        settings = get_settings()
+        dpi = settings.pdf_kept_page_dpi if kept else settings.pdf_scan_dpi
         longest_pt = max(page.rect.width, page.rect.height)
         if longest_pt > 0:
             dpi = max(72, min(dpi, int(_MAX_RENDER_PX / longest_pt * 72)))
-        data = page.get_pixmap(dpi=dpi).tobytes("jpeg", jpg_quality=_JPEG_QUALITY)
+        quality = _KEPT_JPEG_QUALITY if kept else _JPEG_QUALITY
+        data = page.get_pixmap(dpi=dpi).tobytes("jpeg", jpg_quality=quality)
         return ExtractedElement(
             source_page=page_number,
             element_kind=ElementKind.IMAGE,
@@ -236,7 +331,11 @@ class PdfExtractor(Extractor):
             bounding_box=BoundingBox(
                 x0=page.rect.x0, y0=page.rect.y0, x1=page.rect.x1, y1=page.rect.y1
             ),
-            metadata={"image_ext": "jpeg", "whole_page": True},
+            metadata=(
+                {"image_ext": "jpeg", "keep_image": True}
+                if kept
+                else {"image_ext": "jpeg", "whole_page": True}
+            ),
         )
 
     @staticmethod
@@ -286,3 +385,31 @@ class PdfExtractor(Extractor):
                 metadata={"is_table": in_table},
             )
         return None
+
+
+def classify_pages(source: Path | bytes) -> list[PageInfo]:
+    """The kind of every page of the PDF (scan / text / blank), in order.
+
+    ``source`` is a file or the uploaded bytes. Used by the page selection
+    screen; it is the same first look the extractor takes, without the
+    (slower) reading order check of text pages.
+    """
+    opened = (
+        pymupdf.open(stream=source, filetype="pdf")
+        if isinstance(source, bytes)
+        else pymupdf.open(source)
+    )
+    with opened as doc:
+        return [
+            PageInfo(number=index + 1, kind=PdfExtractor._page_kind(page))
+            for index, page in enumerate(doc)
+        ]
+
+
+def render_thumbnails(file_path: Path) -> list[bytes]:
+    """A small JPEG of every page, in order, for the selection screen."""
+    with pymupdf.open(file_path) as doc:
+        return [
+            page.get_pixmap(dpi=_THUMB_DPI).tobytes("jpeg", jpg_quality=_THUMB_QUALITY)
+            for page in doc
+        ]

@@ -128,3 +128,28 @@ jobs:
         run: |
           bash deploy/ci/test-ci-deploy.sh
           bash deploy/backup/test-backup.sh
+
+  # The web app is built by the same commands as in its Docker image. Without
+  # this a type error would only show up at deploy time (and be rolled back).
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check and build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint

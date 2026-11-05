@@ -23,7 +23,12 @@ from app.config import get_settings
 from app.core import vision as vision_pkg
 from app.core.assembly import assemble_docx, assemble_pptx
 from app.core.classifier import classify_elements
-from app.core.ingestion import count_pdf_pages, get_extractor
+from app.core.ingestion import (
+    PageSelection,
+    count_pdf_pages,
+    get_extractor,
+    parse_page_list,
+)
 from app.core.queue.models import Job, JobStatus
 from app.core.queue.store import JobStore
 from app.core.vision import VisionBudget, VisionBudgetExceededError
@@ -54,18 +59,34 @@ def _count_input_pages(path: Path) -> int | None:
     return None
 
 
-def _vision_limit(input_path: str) -> int:
+def _selection_of(job: Job) -> PageSelection | None:
+    """The pages the owner chose, or None when the job has no selection."""
+    if job.selected_pages is None:
+        return None
+    try:
+        chosen = parse_page_list(job.selected_pages)
+    except ValueError:
+        logger.warning("Job %s has an unreadable page selection", job.id)
+        return None
+    return PageSelection(frozenset(chosen), job.keep_unselected)
+
+
+def _vision_limit(input_path: str, selection: PageSelection | None = None) -> int:
     """Gemini request ceiling for one job.
 
     A PDF costs one request per scanned page (and a retry now and then), so
-    its ceiling grows with the page count; everything else keeps the flat
-    ``MAX_VISION_CALLS_PER_JOB``.
+    its ceiling grows with the number of pages that are read (all of them, or
+    the chosen ones); everything else keeps the flat ``MAX_VISION_CALLS_PER_JOB``.
     """
     settings = get_settings()
     limit = settings.max_vision_calls_per_job
     path = Path(input_path)
     if path.suffix.lower() == ".pdf":
-        pages = _count_input_pages(path)
+        pages = (
+            len(selection.selected)
+            if selection is not None
+            else _count_input_pages(path)
+        )
         if pages:
             limit = max(
                 limit,
@@ -91,11 +112,16 @@ def _record_usage(
             * settings.gemini_price_out_per_m
         ) / 1_000_000
         path = Path(job.input_path)
+        selection = _selection_of(job)
         store.record_usage(
             job_id=job.id,
             owner_user_id=job.owner_user_id,
             file_ext=path.suffix.lower().lstrip("."),
-            pages=_count_input_pages(path),
+            pages=(
+                len(selection.selected)
+                if selection is not None
+                else _count_input_pages(path)
+            ),
             vision_calls=budget.used - calls_before,
             input_tokens=budget.input_tokens,
             output_tokens=budget.output_tokens,
@@ -109,13 +135,17 @@ def _record_usage(
 
 
 def _process_job_sync(
-    input_path: str, output_dir: Path, budget: VisionBudget | None = None
+    input_path: str,
+    output_dir: Path,
+    budget: VisionBudget | None = None,
+    selection: PageSelection | None = None,
 ) -> tuple[str, str]:
     """Run the full pipeline synchronously; return (docx_path, pptx_path).
 
     ``budget`` caps the Gemini requests of the job (retries included) and is
     shared with the caller, which reads ``budget.used`` afterwards. Raises
-    ``VisionBudgetExceededError`` when the ceiling is hit.
+    ``VisionBudgetExceededError`` when the ceiling is hit. ``selection`` is the
+    set of PDF pages the owner chose (the others stay pictures or are left out).
 
     This is the SAME pipeline as ``scripts/assemble_document.py`` —
     extract → classify → assemble, with vision called inside the
@@ -123,12 +153,12 @@ def _process_job_sync(
     provider, so each diagram image costs ONE vision call per job.
     """
     source = Path(input_path)
-    classified = classify_elements(get_extractor(source).extract(source))
+    classified = classify_elements(get_extractor(source, selection).extract(source))
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if budget is None:
-        budget = VisionBudget(limit=_vision_limit(input_path))
+        budget = VisionBudget(limit=_vision_limit(input_path, selection))
     vision = CachedVisionProvider(
         factory=lambda: vision_pkg.get_vision_provider(budget)
     )
@@ -156,8 +186,9 @@ async def _worker_loop(store: JobStore) -> None:
 
         # Requests already spent by earlier attempts count against the ceiling,
         # so a retry cannot start the allowance over.
+        selection = _selection_of(job)
         budget = VisionBudget(
-            limit=_vision_limit(job.input_path), used=job.vision_calls
+            limit=_vision_limit(job.input_path, selection), used=job.vision_calls
         )
 
         calls_before = budget.used
@@ -165,8 +196,11 @@ async def _worker_loop(store: JobStore) -> None:
         claimed = job
 
         try:
+            args: tuple[object, ...] = (job.input_path, output_dir, budget)
+            if selection is not None:
+                args += (selection,)
             docx_path, pptx_path = await asyncio.to_thread(
-                _process_job_sync, job.input_path, output_dir, budget
+                _process_job_sync, *args  # type: ignore[arg-type]
             )
             store.update_job(
                 job.id,

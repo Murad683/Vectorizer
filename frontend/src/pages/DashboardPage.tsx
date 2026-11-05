@@ -213,7 +213,7 @@ export default function DashboardPage({ initialJobId }: Props) {
             <div className="min-h-full flex items-center justify-center px-4 sm:px-6 py-8 sm:py-12">
               <div className="max-w-2xl w-full">
                 <HomeGreeting />
-                <UploadZone onUploaded={handleUploaded} />
+                <UploadZone onUploaded={handleUploaded} onProgress={fetchSidebar} />
               </div>
             </div>
           )}

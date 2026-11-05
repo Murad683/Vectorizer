@@ -7,6 +7,7 @@ code as the live pipeline without importing any vision SDK.
 """
 
 import io
+import json
 import logging
 import re
 
@@ -176,7 +177,76 @@ def clean_page(page: PageAnalysis) -> PageAnalysis:
             and any(_inside(b.box_2d, figure) for figure in figures)
         )
     ]
-    return PageAnalysis(blocks=kept)
+    return PageAnalysis(blocks=order_spread(kept))
+
+
+# Two pages photographed side by side (an open book): the model has answered
+# the right page first in every run. A clear empty strip between the pages
+# (no block crosses it) with several blocks on both sides is a spread: the left
+# page is read first. Anything less clear is left exactly as the model gave it.
+_SPREAD_MIN_BLOCKS = 6
+_SPREAD_SIDE_MIN = 3
+_SPREAD_SMALL_SHARE = 0.25
+_SPREAD_GAP = 3  # of 1000: the strip between the pages
+_SPREAD_RANGE = (350, 650)  # where the middle strip may lie
+
+
+def _gutter(boxes: list[list[int]]) -> float | None:
+    """Middle x of the widest empty vertical strip near the centre, or None."""
+    spans = sorted((b[1], b[3]) for b in boxes)
+    best: tuple[int, float] | None = None
+    reach = spans[0][1]
+    for xmin, xmax in spans[1:]:
+        if xmin - reach >= _SPREAD_GAP:
+            middle = (xmin + reach) / 2
+            low, high = _SPREAD_RANGE
+            if low <= middle <= high and (best is None or xmin - reach > best[0]):
+                best = (xmin - reach, middle)
+        reach = max(reach, xmax)
+    return None if best is None else best[1]
+
+
+def order_spread(blocks: list[PageBlock]) -> list[PageBlock]:
+    """Left page before right page for a two-page photo; otherwise unchanged."""
+    if len(blocks) < _SPREAD_MIN_BLOCKS or any(b.box_2d is None for b in blocks):
+        return blocks
+    boxes = [b.box_2d for b in blocks if b.box_2d is not None]
+    middle = _gutter(boxes)
+    if middle is None:
+        return blocks
+    left = [b for b, box in zip(blocks, boxes, strict=True) if box[1] < middle]
+    right = [b for b, box in zip(blocks, boxes, strict=True) if box[1] >= middle]
+    if min(len(left), len(right)) < _SPREAD_SIDE_MIN or (
+        min(len(left), len(right)) < _SPREAD_SMALL_SHARE * len(blocks)
+    ):
+        return blocks
+    return left + right
+
+
+def empty_text_blocks(raw_output: str) -> tuple[int, int]:
+    """(text blocks without any text, all text blocks) in a raw page answer.
+
+    ``clean_page`` drops a text block without text, so a model that leaves the
+    runs out of many blocks (seen live: all 14 question stems of a page) would
+    lose them without a trace. This counts them from the raw JSON first.
+    """
+    try:
+        data = json.loads(raw_output)
+        blocks = data["page"]["blocks"]
+    except (ValueError, KeyError, TypeError):
+        return 0, 0
+    empty = total = 0
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict) or block.get("kind") != "text":
+            continue
+        total += 1
+        runs = block.get("runs")
+        has_text = isinstance(runs, list) and any(
+            isinstance(r, dict) and r.get("text") for r in runs
+        )
+        if not has_text:
+            empty += 1
+    return empty, total
 
 
 def page_topology_problems(page: PageAnalysis) -> list[str]:

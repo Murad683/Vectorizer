@@ -347,3 +347,23 @@ the job; `GET /jobs/{id}/pages` returns the pictures.
 - Switch: `PAGE_SELECTION_ENABLED=false` in `/opt/vectorizer/.env` (append, then recreate the backend)
   makes scanned PDFs start at once again. Jobs already waiting would have to be started or deleted.
 - Migration 0005 adds `page_count`, `selected_pages`, `keep_unselected` to `jobs`.
+
+## Upload list and merged images
+
+The upload box first collects files in a list (remove, add more, pick several); "Başla" sends
+them, each file as its own job. With 2+ PNG/JPEG images in the list the owner can choose "all in one
+document" and put them in order: the images go to `POST /jobs/merge` in one request and become ONE
+job (one Word, one PowerPoint, one page/slide per image).
+
+- The server keeps the images unchanged in `uploads/<job_id>.zip` (stored, not compressed; members
+  `0001.png`, `0002.jpg`, ...). The worker reads each member exactly like a single uploaded image,
+  so quality and cost per page are the same as separate uploads (one Gemini request per image).
+- Only `POST /jobs/merge` creates such a zip; `POST /jobs` still refuses `.zip`. Input cleanup,
+  job delete and `job_usage` (`file_ext` is `zip`, `pages` is the number of images) work unchanged.
+- It counts as one job for the active-jobs allowance and the daily count. The request ceiling is
+  `max(MAX_VISION_CALLS_PER_JOB, images * VISION_CALLS_PER_PAGE + VISION_CALLS_EXTRA)`. There is no
+  limit on the number of images yet (each image keeps the 30 MB limit; the Cloudflare tunnel caps a
+  request at 100 MB): to be decided in the final limits review.
+- The job name is "first image (+N şəkil)"; the download name is the same.
+- No migration and no new setting. Rolling back the code leaves a queued merged job unreadable for
+  the old worker (it fails after its retries).

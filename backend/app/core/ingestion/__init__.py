@@ -5,6 +5,7 @@ from pathlib import Path
 from app.core.ingestion.base import Extractor
 from app.core.ingestion.docx_extractor import DocxExtractor
 from app.core.ingestion.image_extractor import ImageExtractor
+from app.core.ingestion.image_set_extractor import ImageSetExtractor, image_names
 from app.core.ingestion.pdf_extractor import (
     PageInfo,
     PageSelection,
@@ -22,6 +23,8 @@ _EXTRACTORS: dict[str, type[Extractor]] = {
     ".png": ImageExtractor,
     ".jpg": ImageExtractor,
     ".jpeg": ImageExtractor,
+    # Built by the server from images uploaded together; never uploaded as such.
+    ".zip": ImageSetExtractor,
 }
 
 
@@ -48,6 +51,7 @@ __all__ = [
     "DocxExtractor",
     "Extractor",
     "ImageExtractor",
+    "ImageSetExtractor",
     "PageInfo",
     "PageSelection",
     "PdfExtractor",
@@ -55,6 +59,7 @@ __all__ = [
     "count_pdf_pages",
     "format_page_list",
     "get_extractor",
+    "image_names",
     "parse_page_list",
     "render_thumbnails",
 ]

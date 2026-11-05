@@ -27,6 +27,7 @@ from app.core.ingestion import (
     PageSelection,
     count_pdf_pages,
     get_extractor,
+    image_names,
     parse_page_list,
 )
 from app.core.queue.models import Job, JobStatus
@@ -54,6 +55,8 @@ def _count_input_pages(path: Path) -> int | None:
             return count_pdf_pages(path.read_bytes())
         if ext in {".png", ".jpg", ".jpeg"}:
             return 1
+        if ext == ".zip":
+            return len(image_names(path))
     except Exception:  # noqa: BLE001 - the log is optional
         logger.debug("Could not count the pages of %s", path.name, exc_info=True)
     return None
@@ -76,12 +79,14 @@ def _vision_limit(input_path: str, selection: PageSelection | None = None) -> in
 
     A PDF costs one request per scanned page (and a retry now and then), so
     its ceiling grows with the number of pages that are read (all of them, or
-    the chosen ones); everything else keeps the flat ``MAX_VISION_CALLS_PER_JOB``.
+    the chosen ones). Images uploaded together as one document cost one request
+    each and follow the same rule; everything else keeps the flat
+    ``MAX_VISION_CALLS_PER_JOB``.
     """
     settings = get_settings()
     limit = settings.max_vision_calls_per_job
     path = Path(input_path)
-    if path.suffix.lower() == ".pdf":
+    if path.suffix.lower() in {".pdf", ".zip"}:
         pages = (
             len(selection.selected)
             if selection is not None

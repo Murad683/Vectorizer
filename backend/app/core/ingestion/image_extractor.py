@@ -33,20 +33,29 @@ class ImageExtractor(Extractor):
 
     def extract(self, file_path: Path) -> list[ExtractedElement]:
         """Return a single-element list wrapping the whole image file."""
-        raw_bytes = file_path.read_bytes()
-        try:
-            with Image.open(io.BytesIO(raw_bytes)) as img:
-                img.verify()
-        except (UnidentifiedImageError, OSError) as exc:
-            raise ValueError(f"Not a valid image file: {file_path.name}") from exc
-
-        image_ext = _EXT_TO_IMAGE_EXT.get(file_path.suffix.lower(), "png")
+        element = image_element(file_path.read_bytes(), file_path.name)
         logger.info("Extracted 1 image element from %s", file_path.name)
-        return [
-            ExtractedElement(
-                source_page=1,
-                element_kind=ElementKind.IMAGE,
-                raw_content=raw_bytes,
-                metadata={"image_ext": image_ext, "whole_page": True},
-            )
-        ]
+        return [element]
+
+
+def image_element(
+    raw_bytes: bytes, name: str, page_number: int = 1
+) -> ExtractedElement:
+    """One whole-page IMAGE element for the bytes of an image file.
+
+    ``name`` only tells the format (by its extension) and names the file in the
+    error. Raises ``ValueError`` when the bytes are not a decodable image.
+    """
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            img.verify()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(f"Not a valid image file: {name}") from exc
+
+    image_ext = _EXT_TO_IMAGE_EXT.get(Path(name).suffix.lower(), "png")
+    return ExtractedElement(
+        source_page=page_number,
+        element_kind=ElementKind.IMAGE,
+        raw_content=raw_bytes,
+        metadata={"image_ext": image_ext, "whole_page": True},
+    )

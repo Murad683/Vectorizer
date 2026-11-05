@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from app.core.ingestion import (
     format_page_list,
     render_thumbnails,
 )
+from app.core.ingestion.image_extractor import image_element
 from app.core.queue.models import Job, JobStatus
 from app.core.queue.store import JobStore
 from app.models.errors import ErrorResponse
@@ -57,6 +59,36 @@ def _check_ownership(job: Job, user: User, request: Request) -> JSONResponse | N
         return None
     if job.owner_user_id != user.id:
         return _error(403, "forbidden", "You do not have access to this job.", request)
+    return None
+
+
+def _limit_error(store: JobStore, user: User, request: Request) -> JSONResponse | None:
+    """A 429 response when the user may not start another job now, else None.
+
+    Both kinds of upload (one file, or several images merged into one document)
+    count as one job here.
+    """
+    settings = get_settings()
+    if store.count_active_jobs(user.id) >= settings.max_active_jobs_per_user:
+        return _error(
+            429,
+            "too_many_active_jobs",
+            f"Eyni anda ən çox {settings.max_active_jobs_per_user} iş "
+            "gözləyə və ya işlənə bilər. Əvvəlki işlərin bitməsini gözləyin.",
+            request,
+        )
+    day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+    if (
+        store.count_submissions_since(user.id, day_ago)
+        >= settings.max_jobs_per_user_per_day
+    ):
+        return _error(
+            429,
+            "daily_job_limit",
+            f"Son 24 saat ərzində ən çox {settings.max_jobs_per_user_per_day} "
+            "iş göndərə bilərsiniz. Limit dolub, sonra yenidən cəhd edin.",
+            request,
+        )
     return None
 
 
@@ -131,28 +163,11 @@ async def create_job(
         ):
             selection_pages = await asyncio.to_thread(_selection_needed, contents)
 
-    # No await between these checks and create_job below, so two uploads of
+    # No await between this check and create_job below, so two uploads of
     # the same user cannot both slip past the limits.
-    if store.count_active_jobs(current_user.id) >= settings.max_active_jobs_per_user:
-        return _error(
-            429,
-            "too_many_active_jobs",
-            f"Eyni anda ən çox {settings.max_active_jobs_per_user} iş "
-            "gözləyə və ya işlənə bilər. Əvvəlki işlərin bitməsini gözləyin.",
-            request,
-        )
-    day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
-    if (
-        store.count_submissions_since(current_user.id, day_ago)
-        >= settings.max_jobs_per_user_per_day
-    ):
-        return _error(
-            429,
-            "daily_job_limit",
-            f"Son 24 saat ərzində ən çox {settings.max_jobs_per_user_per_day} "
-            "iş göndərə bilərsiniz. Limit dolub, sonra yenidən cəhd edin.",
-            request,
-        )
+    limited = _limit_error(store, current_user, request)
+    if limited is not None:
+        return limited
 
     job_id = uuid4()
     _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -182,6 +197,106 @@ async def create_job(
     if job.page_count is not None:
         content["page_count"] = job.page_count
     return JSONResponse(status_code=201, content=content)
+
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+
+def _first_unreadable_image(items: list[tuple[str, bytes]]) -> str | None:
+    """Name of the first upload that is not a decodable image, if any."""
+    for name, data in items:
+        try:
+            image_element(data, name)
+        except ValueError:
+            return name
+    return None
+
+
+def _write_image_set(path: Path, items: list[tuple[str, bytes]]) -> None:
+    """Store the images as one uncompressed zip; member names give the order."""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for number, (name, data) in enumerate(items, start=1):
+            archive.writestr(f"{number:04d}{Path(name).suffix.lower()}", data)
+
+
+@router.post("/merge", response_model=None)
+async def create_merged_job(
+    files: list[UploadFile],
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Accept several images and make ONE job (one Word, one PowerPoint).
+
+    The images are kept unchanged in the order they were sent; each becomes its
+    own page. Only PNG/JPEG images can be merged.
+    """
+    store = _get_store(request)
+    settings = get_settings()
+
+    if len(files) < 2:
+        return _error(
+            400,
+            "merge_needs_two",
+            "Birləşdirmək üçün ən azı 2 şəkil lazımdır.",
+            request,
+        )
+
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    items: list[tuple[str, bytes]] = []
+    for upload in files:
+        if not upload.filename:
+            return _error(
+                400, "missing_filename", "Uploaded file has no filename.", request
+            )
+        if Path(upload.filename).suffix.lower() not in _IMAGE_EXTENSIONS:
+            return _error(
+                400,
+                "merge_only_images",
+                f"«{upload.filename}» şəkil deyil. Yalnız PNG və JPEG şəkilləri "
+                "birləşdirilə bilər.",
+                request,
+            )
+        contents = await upload.read()
+        if len(contents) > max_bytes:
+            return _error(
+                413,
+                "file_too_large",
+                f"«{upload.filename}» {settings.max_upload_size_mb} MB "
+                "limitini aşır.",
+                request,
+            )
+        items.append((upload.filename, contents))
+
+    bad = await asyncio.to_thread(_first_unreadable_image, items)
+    if bad is not None:
+        return _error(400, "invalid_image", f"«{bad}» şəkli oxuna bilmir.", request)
+
+    # No await between this check and create_job below (see create_job).
+    limited = _limit_error(store, current_user, request)
+    if limited is not None:
+        return limited
+
+    job_id = uuid4()
+    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    input_path = _UPLOAD_DIR / f"{job_id}.zip"
+    _write_image_set(input_path, items)
+
+    first_stem = Path(items[0][0]).stem[:120]
+    job = store.create_job(
+        job_id=job_id,
+        input_filename=f"{first_stem} (+{len(items) - 1} şəkil)",
+        input_path=str(input_path),
+        owner_user_id=current_user.id,
+    )
+    logger.info(
+        "Created merged job %s from %d images (user %s)",
+        job.id,
+        len(items),
+        current_user.email,
+    )
+    return JSONResponse(
+        status_code=201, content={"job_id": str(job.id), "status": job.status.value}
+    )
 
 
 _DEFAULT_PAGE_SIZE = 20
@@ -446,7 +561,12 @@ async def download_job_output(
             404, "output_not_found", f"Output file ({fmt}) not found on disk.", request
         )
 
-    stem = Path(job.input_filename).stem
+    # A merged job's name ("first (+2 şəkil)") has no extension to cut off.
+    stem = (
+        job.input_filename
+        if Path(job.input_path).suffix.lower() == ".zip"
+        else Path(job.input_filename).stem
+    )
     return FileResponse(
         path=path,
         media_type=media_type,

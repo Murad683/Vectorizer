@@ -187,6 +187,16 @@ export const api = {
     });
   },
 
+  /** Several images as ONE job (one Word, one PowerPoint); the order is the page order. */
+  uploadMerged(files: File[]) {
+    const form = new FormData();
+    for (const file of files) form.append('files', file);
+    return request<{ job_id: string; status: string }>('/jobs/merge', {
+      method: 'POST',
+      body: form,
+    });
+  },
+
   downloadUrl(jobId: string, format: string) {
     return `${BASE}/jobs/${jobId}/download?format=${format}`;
   },

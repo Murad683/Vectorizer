@@ -62,14 +62,29 @@ export default function PageSelection({ job, onStarted }: Props) {
   const stats = useMemo(() => {
     const all = pages ?? [];
     const chosen = all.filter(p => selected.has(p.n));
+    const rest = all.filter(p => !selected.has(p.n));
     return {
       total: all.length,
       chosen: chosen.length,
       read: chosen.filter(p => p.kind === 'scan').length,
-      others: all.length - chosen.length,
+      // Pages not chosen: a blank one is always left out, never kept as a picture.
+      others: rest.filter(p => p.kind !== 'blank').length,
+      blankLeftOut: rest.filter(p => p.kind === 'blank').length,
       scans: all.filter(p => p.kind === 'scan').length,
     };
   }, [pages, selected]);
+
+  // What happens to the pages that are not chosen, in words.
+  const restText = (() => {
+    if (!keepUnselected) {
+      const left = stats.others + stats.blankLeftOut;
+      return left > 0 ? `${left} səhifə atılacaq.` : '';
+    }
+    const parts: string[] = [];
+    if (stats.others > 0) parts.push(`${stats.others} səhifə şəkil kimi qalacaq`);
+    if (stats.blankLeftOut > 0) parts.push(`${stats.blankLeftOut} boş səhifə atılacaq`);
+    return parts.length ? `${parts.join(', ')}.` : '';
+  })();
 
   function toggle(n: number) {
     setConfirmEmpty(false);
@@ -249,9 +264,7 @@ export default function PageSelection({ job, onStarted }: Props) {
       <p className="text-sm text-ink-secondary mb-4" aria-live="polite">
         {stats.chosen} səhifə seçilib
         {stats.read > 0 ? `, ${stats.read} skan səhifə süni intellektlə oxunacaq` : ''}.{' '}
-        {stats.others > 0
-          ? `${stats.others} səhifə ${keepUnselected ? 'şəkil kimi qalacaq' : 'atılacaq'}.`
-          : ''}
+        {restText}
       </p>
 
       {confirmEmpty ? (

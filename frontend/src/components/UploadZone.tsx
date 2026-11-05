@@ -33,6 +33,10 @@ function extensionOf(file: File): string {
   return '.' + (file.name.split('.').pop() ?? '').toLowerCase();
 }
 
+function isImage(file: File): boolean {
+  return IMAGE_EXTENSIONS.includes(extensionOf(file));
+}
+
 function fileKey(file: File): string {
   return `${file.name}|${file.size}|${file.lastModified}`;
 }
@@ -66,6 +70,8 @@ export default function UploadZone({ onUploaded, onProgress }: Props) {
   const [items, setItems] = useState<StagedFile[]>([]);
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState('');
+  // "All images in one document" (only offered when 2+ valid images are listed).
+  const [mergeImages, setMergeImages] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
   const itemsRef = useRef<StagedFile[]>([]);
@@ -104,9 +110,7 @@ export default function UploadZone({ onUploaded, onProgress }: Props) {
         error: error ?? '',
         uploading: false,
         preview:
-          error === null && IMAGE_EXTENSIONS.includes(extensionOf(file))
-            ? URL.createObjectURL(file)
-            : null,
+          error === null && isImage(file) ? URL.createObjectURL(file) : null,
       });
     }
     setNotice(repeated ? 'Eyni fayl artıq siyahıdadır.' : '');
@@ -124,6 +128,21 @@ export default function UploadZone({ onUploaded, onProgress }: Props) {
     setItems(prev => prev.map(i => (i.id === id ? { ...i, ...patch } : i)));
   }
 
+  // Move an image one place up or down among the listed images (page order).
+  function moveImage(id: number, step: -1 | 1) {
+    setItems(prev => {
+      const slots = prev.flatMap((item, index) =>
+        !item.invalid && isImage(item.file) ? [index] : [],
+      );
+      const at = slots.findIndex(index => prev[index].id === id);
+      const to = at + step;
+      if (at < 0 || to < 0 || to >= slots.length) return prev;
+      const next = [...prev];
+      [next[slots[at]], next[slots[to]]] = [next[slots[to]], next[slots[at]]];
+      return next;
+    });
+  }
+
   async function startUpload() {
     const queue = items.filter(i => !i.invalid);
     if (!queue.length || sending) return;
@@ -133,17 +152,35 @@ export default function UploadZone({ onUploaded, onProgress }: Props) {
     let firstJobId: string | null = null;
     let stoppedByLimit = false;
 
-    for (const entry of queue) {
-      patchItem(entry.id, { uploading: true, error: '' });
+    // A unit is what becomes one job: all the images together when they are
+    // merged, otherwise one file.
+    const units: StagedFile[][] = merging
+      ? [images, ...queue.filter(i => !images.includes(i)).map(i => [i])]
+      : queue.map(i => [i]);
+
+    for (const unit of units) {
+      for (const entry of unit) patchItem(entry.id, { uploading: true, error: '' });
       try {
-        const res = await api.uploadFile(entry.file);
+        const res =
+          unit.length > 1
+            ? await api.uploadMerged(unit.map(i => i.file))
+            : await api.uploadFile(unit[0].file);
         firstJobId ??= res.job_id;
-        sent += 1;
-        if (entry.preview) URL.revokeObjectURL(entry.preview);
-        setItems(prev => prev.filter(i => i.id !== entry.id));
+        sent += unit.length;
+        for (const entry of unit) {
+          if (entry.preview) URL.revokeObjectURL(entry.preview);
+        }
+        const done = new Set(unit.map(i => i.id));
+        setItems(prev => prev.filter(i => !done.has(i.id)));
         onProgress?.();
       } catch (err) {
-        patchItem(entry.id, { uploading: false, error: describeError(err) });
+        // A failed merge shows its message once, on the first image of the set.
+        unit.forEach((entry, index) =>
+          patchItem(entry.id, {
+            uploading: false,
+            error: index === 0 ? describeError(err) : '',
+          }),
+        );
         if (err instanceof ApiError && LIMIT_CODES.includes(err.code ?? '')) {
           stoppedByLimit = true;
           break;
@@ -181,6 +218,9 @@ export default function UploadZone({ onUploaded, onProgress }: Props) {
 
   const ready = items.filter(i => !i.invalid).length;
   const staged = items.length > 0;
+  const images = items.filter(i => !i.invalid && isImage(i.file));
+  const canMerge = images.length >= 2;
+  const merging = mergeImages && canMerge;
 
   return (
     <div className="mb-8">
@@ -229,8 +269,15 @@ export default function UploadZone({ onUploaded, onProgress }: Props) {
       {staged && (
         <>
           <ul className="mt-4 border border-border rounded-xl divide-y divide-border" aria-label="Seçilmiş fayllar">
-            {items.map(item => (
+            {items.map(item => {
+              const place = merging ? images.indexOf(item) : -1; // page number - 1
+              return (
               <li key={item.id} className="flex items-center gap-3 px-3 py-2.5">
+                {place >= 0 && (
+                  <span className="w-5 shrink-0 text-center text-xs font-semibold text-ink-secondary">
+                    {place + 1}.
+                  </span>
+                )}
                 {item.preview ? (
                   <img
                     src={item.preview}
@@ -261,21 +308,76 @@ export default function UploadZone({ onUploaded, onProgress }: Props) {
                     aria-label="Yüklənir"
                   />
                 ) : (
-                  <button
-                    onClick={() => removeItem(item.id)}
-                    disabled={sending}
-                    aria-label={`${item.file.name} faylını siyahıdan sil`}
-                    title="Sil"
-                    className="shrink-0 p-1.5 rounded-lg text-muted hover:text-ink hover:bg-surface transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-                    </svg>
-                  </button>
+                  <div className="flex items-center shrink-0">
+                    {place >= 0 && (
+                      <>
+                        <button
+                          onClick={() => moveImage(item.id, -1)}
+                          disabled={sending || place === 0}
+                          aria-label={`${item.file.name} şəklini yuxarı apar`}
+                          title="Yuxarı"
+                          className="p-1.5 rounded-lg text-muted hover:text-ink hover:bg-surface transition-colors disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={() => moveImage(item.id, 1)}
+                          disabled={sending || place === images.length - 1}
+                          aria-label={`${item.file.name} şəklini aşağı apar`}
+                          title="Aşağı"
+                          className="p-1.5 rounded-lg text-muted hover:text-ink hover:bg-surface transition-colors disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                          </svg>
+                        </button>
+                      </>
+                    )}
+                    <button
+                      onClick={() => removeItem(item.id)}
+                      disabled={sending}
+                      aria-label={`${item.file.name} faylını siyahıdan sil`}
+                      title="Sil"
+                      className="p-1.5 rounded-lg text-muted hover:text-ink hover:bg-surface transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
+
+          {canMerge && (
+            <fieldset className="mt-4 flex flex-col gap-2" disabled={sending}>
+              <legend className="sr-only">Şəkillərin necə işlənəcəyi</legend>
+              <label className="flex items-center gap-2 text-sm text-ink-secondary cursor-pointer">
+                <input
+                  type="radio"
+                  name="image-mode"
+                  checked={!merging}
+                  onChange={() => setMergeImages(false)}
+                  className="w-4 h-4 accent-[#fee500] cursor-pointer"
+                />
+                Hər biri ayrı sənəd
+              </label>
+              <label className="flex items-center gap-2 text-sm text-ink-secondary cursor-pointer">
+                <input
+                  type="radio"
+                  name="image-mode"
+                  checked={merging}
+                  onChange={() => setMergeImages(true)}
+                  className="w-4 h-4 accent-[#fee500] cursor-pointer"
+                />
+                Hamısı bir sənəd ({images.length} şəkil, göstərilən sıra ilə)
+              </label>
+            </fieldset>
+          )}
 
           <div className="mt-4 flex items-center gap-3">
             <button

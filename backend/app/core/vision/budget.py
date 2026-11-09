@@ -25,6 +25,8 @@ class VisionBudget:
         self.input_tokens = 0
         self.output_tokens = 0
         self.thought_tokens = 0
+        # Requests of this attempt by kind ("page", "page_repeat", ...), for the log.
+        self.by_kind: dict[str, int] = {}
 
     def consume(self) -> None:
         """Reserve one request; raise ``VisionBudgetExceededError`` if none is left."""
@@ -39,8 +41,14 @@ class VisionBudget:
         input_tokens: int | None,
         output_tokens: int | None,
         thought_tokens: int | None,
+        kind: str | None = None,
     ) -> None:
-        """Add the token numbers of one answer (``None`` counts as zero)."""
+        """Add the token numbers of one answer (``None`` counts as zero).
+
+        ``kind`` (when given) also counts the answer in ``by_kind``.
+        """
         self.input_tokens += input_tokens or 0
         self.output_tokens += output_tokens or 0
         self.thought_tokens += thought_tokens or 0
+        if kind is not None:
+            self.by_kind[kind] = self.by_kind.get(kind, 0) + 1

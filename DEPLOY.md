@@ -407,3 +407,35 @@ answers are NOT: keep the corpus folder outside the repo (the tool refuses a fol
 - Severity: `error` = content is missing; `review` = a person should look (a page header the
   model left out on purpose, a figure at the edge of the photo, ...). Very large ink areas (the
   table or cover around a photographed page) are treated as background.
+
+## Saved answers and the automatic gap check
+
+Every finished job that sent pages to the model leaves two things for us to learn from:
+
+- The model's answer for each page, in `data/answers/<job id>.json` (`SAVE_PAGE_ANSWERS`). With
+  the input file (`data/uploads/<job id>.<ext>`) it can be played back through the real pipeline
+  for free: `backend/scripts/gap_check.py` (a corpus folder with `source.<ext>` and
+  `runs/run1/results.json` holding this file).
+- The automatic gap check (`AUTO_GAP_CHECK`, the detectors of `backend/app/eval/gaps.py`): how
+  many pages were checked, how many errors (ink that no block explains, empty "A)" options, text
+  missing from the Word file, ...) and pages to review, and the errors by kind. They go to the
+  `job_quality` table (numbers only) and to one log line `gap_check job=... errors=...`.
+  `job_usage.calls_by_kind` counts the Gemini requests by kind (`page`, `page_repeat`,
+  `flowchart_rescue`, `topology_retry`).
+
+Read them on the server, inside the backend container:
+
+```
+docker compose -p vectorizer -f docker-compose.prod.yml exec backend python -m app.quality_report --days 7
+docker compose -p vectorizer -f docker-compose.prod.yml exec backend python -m app.usage_report --days 7
+```
+
+- Both run only after a job has COMPLETED and whatever goes wrong there is logged and never
+  reaches the job. Switch either off with `SAVE_PAGE_ANSWERS=false` / `AUTO_GAP_CHECK=false` in
+  `/opt/vectorizer/.env` (append, then recreate the backend).
+- Retention: `INPUT_RETENTION_HOURS` (default 24; 720 = 30 days) applies to the input files and to
+  `data/answers/*.json` (by the age of the file); the nightly `app.cleanup_inputs` removes them.
+- **Deleting a job** (the "Sil" button) removes the Word/PowerPoint result and the job row, but NOT
+  the input file and the saved answers: jobs an owner deletes are often the ones that came out
+  badly. They leave by age, as above.
+- Migration 0006 adds the `job_quality` table and `job_usage.calls_by_kind` (empty for older rows).

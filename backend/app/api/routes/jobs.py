@@ -580,7 +580,12 @@ async def delete_job(
     request: Request,
     current_user: User = Depends(get_current_user),
 ) -> Response | JSONResponse:
-    """Delete a job and its files from disk.
+    """Delete a job and its result files from disk.
+
+    The uploaded input file is NOT removed here: jobs their owner deletes are
+    often the ones that came out badly, so the input (and the saved model
+    answers) stay for ``INPUT_RETENTION_HOURS`` and are then removed by the
+    daily cleanup (``app.cleanup_inputs``) like every other input.
 
     Returns 404 if the job doesn't exist, 403 if the user doesn't own
     it (and isn't admin), 204 on success.
@@ -594,7 +599,7 @@ async def delete_job(
     if denied is not None:
         return denied
 
-    for path_str in (job.input_path, job.output_docx_path, job.output_pptx_path):
+    for path_str in (job.output_docx_path, job.output_pptx_path):
         if not path_str:
             continue
         path = Path(path_str)

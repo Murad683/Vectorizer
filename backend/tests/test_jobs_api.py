@@ -393,6 +393,26 @@ class TestJobDeletion:
         resp = client.get(f"/jobs/{job_id}", headers=_auth(token))
         assert resp.status_code == 404
 
+    def test_delete_keeps_the_uploaded_input_for_the_daily_cleanup(
+        self, client: TestClient, sample_bytes: bytes
+    ) -> None:
+        from uuid import UUID
+
+        token = _login(client)
+        job_id = client.post(
+            "/jobs",
+            files={"file": ("test.docx", sample_bytes, "application/octet-stream")},
+            headers=_auth(token),
+        ).json()["job_id"]
+        store = client.app.state.job_store  # type: ignore[union-attr]
+        input_path = Path(store.get_job(UUID(job_id)).input_path)
+        assert input_path.exists()
+
+        assert client.delete(f"/jobs/{job_id}", headers=_auth(token)).status_code == 204
+        assert store.get_job(UUID(job_id)) is None
+        assert input_path.exists()  # jobs an owner deletes are worth learning from
+        input_path.unlink()
+
     def test_delete_removes_files_from_disk(
         self, client: TestClient, sample_bytes: bytes, tmp_path: Path
     ) -> None:

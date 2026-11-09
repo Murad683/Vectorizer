@@ -16,6 +16,7 @@ number, a figure that touches the edge of the photo, ...).
 """
 
 import difflib
+import functools
 import io
 import re
 import zipfile
@@ -368,11 +369,26 @@ def docx_text(path: Path) -> str:
     return "\n".join(parts)
 
 
+@functools.lru_cache(maxsize=2)
+def _docx_facts(path: str, modified_ns: int, size: int) -> tuple[str, int, bool]:
+    """(normalised text, number of pictures, has drawn shapes) of a Word file.
+
+    Cached by path, modification time and size: a many-page document is looked into
+    once, not once per page.
+    """
+    document = docx.Document(path)
+    with zipfile.ZipFile(path) as archive:
+        has_shapes = b"wps:wsp" in archive.read("word/document.xml")
+    return _norm(docx_text(Path(path))), len(document.inline_shapes), has_shapes
+
+
 def check_assembly(page: PageAnalysis, docx_path: Path, image: bytes) -> list[Gap]:
     """Look into the built Word file: is what the answer describes really in it?"""
     gaps: list[Gap] = []
-    document = docx.Document(str(docx_path))
-    body = _norm(docx_text(docx_path))
+    stat = docx_path.stat()
+    body, pictures, has_shapes = _docx_facts(
+        str(docx_path), stat.st_mtime_ns, stat.st_size
+    )
     for block in page.blocks:
         if block.kind == BlockKind.TEXT and block.text.strip():
             if _norm(block.text) not in body:
@@ -405,9 +421,6 @@ def check_assembly(page: PageAnalysis, docx_path: Path, image: bytes) -> list[Ga
         and crop_figure(image, list(box), neighbour_boxes(page.blocks, b)) is not None
     ]
     flowcharts = [b for b in page.blocks if b.kind == BlockKind.FLOWCHART]
-    pictures = len(document.inline_shapes)
-    with zipfile.ZipFile(docx_path) as archive:
-        has_shapes = b"wps:wsp" in archive.read("word/document.xml")
     if pictures < len(figures):
         gaps.append(
             Gap(

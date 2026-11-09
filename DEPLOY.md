@@ -367,3 +367,23 @@ job (one Word, one PowerPoint, one page/slide per image).
 - The job name is "first image (+N şəkil)"; the download name is the same.
 - No migration and no new setting. Rolling back the code leaves a queued merged job unreadable for
   the old worker (it fails after its retries).
+
+## Figure cut
+
+The vision model sometimes gives a figure box that covers only part of the figure (a matrix without
+its last column, answer pictures without their letters). The cut used to take that box as it was (plus
+a little padding), so the figure in the Word/PowerPoint was incomplete.
+
+- `refine_figure_box` (`backend/app/core/assembly/figure_region.py`) now looks at the ink on the page
+  image: starting from the model's box it takes in the parts of the figure that lie close by (gaps up
+  to ~12% of the page width), and the letters ("A)") right next to a picture. It stops at the text
+  blocks the model returned, never takes a line of handwriting further away, and never makes the box
+  narrower than the model's. A box that is already right (growth under 2% of the page) is left as it is,
+  and so is a result over 85% of the page or over 6 times the model's box. Any error keeps the model's box.
+- When the model's box reaches into the text block above or below the figure, that edge is pulled
+  back to the text (only through a strip without figure ink).
+- Log lines: `figure box widened from [...] to [...]` when it changes a box; `figure_edge_ink share=...`
+  when the cut still has ink on its border (the figure probably goes on). Count them in the backend
+  log to see how often the model's box is too narrow.
+- Switch: `FIGURE_REFINE_ENABLED=false` in `/opt/vectorizer/.env` (append, then recreate the backend)
+  goes back to cutting the model's box as it is. No Gemini request is involved, no migration.

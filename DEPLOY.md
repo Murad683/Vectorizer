@@ -387,3 +387,23 @@ a little padding), so the figure in the Word/PowerPoint was incomplete.
   log to see how often the model's box is too narrow.
 - Switch: `FIGURE_REFINE_ENABLED=false` in `/opt/vectorizer/.env` (append, then recreate the backend)
   goes back to cutting the model's box as it is. No Gemini request is involved, no migration.
+
+## Gap check (local test tool, not part of the server)
+
+`backend/scripts/gap_check.py` looks for what a conversion loses. It runs on a developer
+machine only. The code is in the repo (`backend/app/eval/`), the test pages and the recorded
+answers are NOT: keep the corpus folder outside the repo (the tool refuses a folder inside it).
+
+- `synth <corpus> [--photo] [--fake-runs]`: made-up pages with known text, plus a good and a
+  broken model answer (a mistake that really happened: picture options returned as empty "A)").
+- `capture <corpus> --runs 3 --yes`: sends every page to Gemini N times and saves each answer
+  (`runs/runK/results.json`) and its usage. It prints the number of requests and a cost range
+  and sends nothing without `--yes`. Gemini requests cost money: ask first.
+- `check <corpus>`: offline and free. Plays the recorded answers back through the real pipeline
+  and looks at the SOURCE image for gaps: ink no block explains, empty option letters, text boxes
+  with almost no text, figures cut through, blocks out of order, text missing from the Word file,
+  and (with `expected.txt`) expected lines that are missing. It writes `reports/<time>/index.html`.
+- A run directory may also hold a bare model answer saved as `results.json`.
+- Severity: `error` = content is missing; `review` = a person should look (a page header the
+  model left out on purpose, a figure at the edge of the photo, ...). Very large ink areas (the
+  table or cover around a photographed page) are treated as background.

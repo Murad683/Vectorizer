@@ -25,6 +25,7 @@ from pathlib import Path
 import cv2
 import docx
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 
 from app.config import get_settings
@@ -89,7 +90,7 @@ def _valid_box(block: PageBlock) -> Box | None:
     return ymin, xmin, ymax, xmax
 
 
-def _ink_mask(image: bytes) -> np.ndarray | None:
+def _ink_mask(image: bytes) -> NDArray[np.uint8] | None:
     gray = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         return None

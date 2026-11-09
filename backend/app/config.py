@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # dropped real lines when a box was a little off. Needs calibration on
     # more photographs before it is switched on.
     ghost_filter_enabled: bool = False
+    # A figure box that covers only part of a figure is widened to the whole
+    # figure by looking at the ink on the page (stops at text). false = cut the
+    # model's box as it is.
+    figure_refine_enabled: bool = True
     frontend_origin: str = "http://localhost:5173"
     # Dev aid: when set, every vision call saves its image, prompt, raw model
     # output and measured geometry under this directory, so layout/render can

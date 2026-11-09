@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from PIL import Image
 
 from app.config import get_settings
+from app.core.assembly.figure_region import border_ink_share, refine_figure_box
 from app.core.rich_text import markup_runs
 from app.core.vision.base import VisionProvider
 from app.models.document import ClassifiedElement, VisionResult
@@ -29,6 +30,8 @@ _OPTION_START = re.compile(r"^\s*[A-Ea-e]\s*\)")
 # Figures are cut a little wider than the model's box: it often clips the
 # option letters ("A)") at the edge. Units of 1000.
 _CROP_PAD = 12
+# More dark pixels than this share on the border of a cut figure get logged.
+_EDGE_INK_WARN = 0.08
 
 # A flowchart slide keeps its question lines and options on the same slide
 # only while they leave this much of the slide to the chart.
@@ -128,6 +131,8 @@ def crop_figure(
     """
     if box_2d is None or len(box_2d) != 4:
         return None
+    if get_settings().figure_refine_enabled:
+        box_2d = refine_figure_box(image, box_2d, others)
     try:
         with Image.open(io.BytesIO(image)) as img:
             width, height = img.size
@@ -141,10 +146,13 @@ def crop_figure(
             bottom = min(height, max(top + 1, int(ymax / 1000 * height)))
             if right - left < 4 or bottom - top < 4:
                 return None
+            cropped = img.convert("RGB").crop((left, top, right, bottom))
+            edge = border_ink_share(cropped)
+            if edge > _EDGE_INK_WARN:
+                # Ink on the very edge of the cut: the figure probably goes on.
+                logger.warning("figure_edge_ink share=%.2f box=%s", edge, box_2d)
             buffer = io.BytesIO()
-            img.convert("RGB").crop((left, top, right, bottom)).save(
-                buffer, format="PNG"
-            )
+            cropped.save(buffer, format="PNG")
             return buffer.getvalue()
     except Exception:  # noqa: BLE001 - a broken figure must not sink the page
         logger.warning("Could not cut a figure out of the page image")

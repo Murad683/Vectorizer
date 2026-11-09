@@ -318,9 +318,8 @@ class GeminiVisionProvider(VisionProvider):
                     "gemini_usage kind=%s in=%s out=%s thoughts=%s", kind, *tokens
                 )
                 if self._budget is not None:
-                    self._budget.add_usage(
-                        *(t if isinstance(t, int) else None for t in tokens)
-                    )
+                    counts = [t if isinstance(t, int) else None for t in tokens]
+                    self._budget.add_usage(counts[0], counts[1], counts[2], kind=kind)
             for candidate in getattr(response, "candidates", None) or []:
                 if "MAX_TOKENS" in str(getattr(candidate, "finish_reason", "")):
                     cut = True

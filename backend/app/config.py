@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # figure by looking at the ink on the page (stops at text). false = cut the
     # model's box as it is.
     figure_refine_enabled: bool = True
+    # What a finished job leaves for us to learn from. The model's answer for each
+    # page is saved to data/answers/<job id>.json (removed by the daily cleanup after
+    # INPUT_RETENTION_HOURS), and the automatic gap check (see app/eval/gaps.py)
+    # counts what the conversion lost into the job_quality table. Both only ever
+    # run after a job has completed and can never fail it.
+    save_page_answers: bool = True
+    auto_gap_check: bool = True
     frontend_origin: str = "http://localhost:5173"
     # Dev aid: when set, every vision call saves its image, prompt, raw model
     # output and measured geometry under this directory, so layout/render can

@@ -92,6 +92,15 @@ def build_report(rows: Sequence[Mapping[str, Any]], days: int, usd_azn: float) -
     lines.append(
         "Nəticələr: " + ", ".join(f"{k}={v}" for k, v in sorted(outcomes.items()))
     )
+    kinds: dict[str, int] = defaultdict(int)
+    for row in rows:
+        for kind, count in (row.get("calls_by_kind") or {}).items():
+            kinds[kind] += int(count)
+    if kinds:
+        lines.append(
+            "Sorğular növ üzrə: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(kinds.items()))
+        )
 
     lines += ["", f"Ən bahalı {_TOP} sətir:"]
     top = sorted(rows, key=lambda r: _num(r["est_cost_usd"]), reverse=True)[:_TOP]

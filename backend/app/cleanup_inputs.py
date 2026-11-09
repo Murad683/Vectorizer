@@ -8,7 +8,10 @@ Only INPUT files are ever removed. Deleted:
 
 - the input file of a COMPLETED or FAILED job, ``INPUT_RETENTION_HOURS`` after
   the job reached that state (``jobs.updated_at``);
-- an upload with no job row at all (a crashed upload) that old;
+- an upload with no job row at all that old (a crashed upload, or the input of a job
+  its owner deleted: deleting a job removes what the owner sees, not the input);
+- the saved model answers ``data/answers/<uuid>.json`` that old (by the age of the
+  file), unless their job is still waiting or running;
 - an empty ``data/jobs/<uuid>`` directory whose job is not waiting or running.
 
 Before that, a scanned PDF still waiting for its page selection after
@@ -40,6 +43,7 @@ logger = logging.getLogger("app.cleanup_inputs")
 
 UPLOADS_DIR = Path("data/uploads")
 JOBS_DIR = Path("data/jobs")
+ANSWERS_DIR = Path("data/answers")
 
 _ACTIVE = (
     JobStatus.AWAITING_SELECTION,
@@ -55,7 +59,7 @@ class Candidate:
     """One thing the cleanup would delete."""
 
     path: Path
-    kind: str  # "input" | "orphan_input" | "empty_dir"
+    kind: str  # "input" | "orphan_input" | "answers" | "empty_dir"
     job_id: UUID | None
     detail: str
     size: int
@@ -100,6 +104,7 @@ def find_candidates(
     jobs_dir: Path,
     retention_hours: float,
     now: datetime,
+    answers_dir: Path | None = None,
 ) -> tuple[list[Candidate], list[str]]:
     """Return (things to delete, report-only notes). Deletes nothing."""
     cutoff = now - timedelta(hours=retention_hours)
@@ -143,6 +148,26 @@ def find_candidates(
                     kind="orphan_input",
                     job_id=job_id,
                     detail="upload without a job row",
+                    size=path.stat().st_size,
+                    age_hours=age,
+                )
+
+    if answers_dir is not None and answers_dir.is_dir():
+        for path in sorted(answers_dir.iterdir()):
+            job_id = _as_uuid(path.stem)
+            if (
+                job_id is None
+                or path.suffix != ".json"
+                or not _is_plain_file_in(path, answers_dir)
+            ):
+                continue
+            age = _age_hours(path, now)
+            if age >= retention_hours:
+                found[path] = Candidate(
+                    path=path,
+                    kind="answers",
+                    job_id=job_id,
+                    detail="saved model answers",
                     size=path.stat().st_size,
                     age_hours=age,
                 )
@@ -212,8 +237,9 @@ def run_cleanup(
     uploads_dir: Path = UPLOADS_DIR,
     jobs_dir: Path = JOBS_DIR,
     now: datetime | None = None,
+    answers_dir: Path | None = None,
 ) -> CleanupResult:
-    """Find and (unless ``dry_run``) delete stale input files."""
+    """Find and (unless ``dry_run``) delete stale input files and saved answers."""
     now = now or datetime.now(timezone.utc)
     result = CleanupResult(dry_run=dry_run)
     result.candidates, result.notes = find_candidates(
@@ -222,6 +248,7 @@ def run_cleanup(
         jobs_dir=jobs_dir,
         retention_hours=retention_hours,
         now=now,
+        answers_dir=answers_dir,
     )
     for note in result.notes:
         logger.warning("note: %s", note)
@@ -306,7 +333,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             store, expiry_hours=settings.selection_expiry_hours, dry_run=dry_run
         )
         result = run_cleanup(
-            store, retention_hours=hours, max_deletions=limit, dry_run=dry_run
+            store,
+            retention_hours=hours,
+            max_deletions=limit,
+            dry_run=dry_run,
+            answers_dir=ANSWERS_DIR,
         )
     finally:
         store.close()

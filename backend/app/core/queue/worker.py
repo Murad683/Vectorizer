@@ -17,6 +17,8 @@ import asyncio
 import logging
 import time
 import traceback
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import get_settings
@@ -33,12 +35,35 @@ from app.core.ingestion import (
 from app.core.queue.models import Job, JobStatus
 from app.core.queue.store import JobStore
 from app.core.vision import VisionBudget, VisionBudgetExceededError
+from app.core.vision.base import VisionProvider
 from app.core.vision.cache import CachedVisionProvider
+from app.eval.gaps import ERROR, check_assembly, find_gaps
+from app.eval.replay import RecordingProvider, page_of, result_key, save_results
+from app.models.document import ElementKind, VisionResult
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 2.0
 _JOBS_OUTPUT_DIR = Path("data/jobs")
+ANSWERS_DIR = Path("data/answers")
+
+
+@dataclass
+class JobReport:
+    """What one run of the pipeline leaves behind for the work after the job.
+
+    The worker puts one in ``_job_report`` before it starts the pipeline in a
+    thread (a context variable, so the pipeline function keeps its signature);
+    the pipeline fills it: the model's answers, the whole-page images that were
+    sent, and the Word file it built.
+    """
+
+    answers: dict[str, VisionResult] = field(default_factory=dict)
+    images: list[bytes] = field(default_factory=list)
+    docx_path: Path | None = None
+
+
+_job_report: ContextVar[JobReport | None] = ContextVar("job_report", default=None)
 
 
 _BUDGET_EXCEEDED_MESSAGE = (
@@ -134,9 +159,64 @@ def _record_usage(
             est_cost_usd=cost,
             duration_s=time.monotonic() - started,
             outcome=outcome,
+            calls_by_kind=dict(budget.by_kind) or None,
         )
     except Exception:  # noqa: BLE001 - the usage log must never fail a job
         logger.warning("Could not write the usage row of job %s", job.id, exc_info=True)
+
+
+def _after_job(store: JobStore, job: Job, report: JobReport) -> None:
+    """Save the model's answers and run the gap check of a completed job.
+
+    Both are for us to learn from (see ``save_page_answers`` and
+    ``auto_gap_check``); whatever goes wrong here is logged and never reaches
+    the job, which is already completed.
+    """
+    try:
+        settings = get_settings()
+        if not report.answers:
+            return  # nothing was asked of the model (text-only document)
+        if settings.save_page_answers:
+            save_results(ANSWERS_DIR / f"{job.id}.json", report.answers)
+        if settings.auto_gap_check and report.docx_path is not None:
+            _check_gaps(store, job, report, report.docx_path)
+    except Exception:  # noqa: BLE001 - learning from a job must never hurt it
+        logger.warning("Could not look at the finished job %s", job.id, exc_info=True)
+
+
+def _check_gaps(store: JobStore, job: Job, report: JobReport, docx_path: Path) -> None:
+    """Count what the conversion lost, page by page, into the quality log."""
+    errors = reviews = checked = 0
+    kinds: dict[str, int] = {}
+    for image in report.images:
+        page = page_of(report.answers.get(result_key(image)))
+        if page is None:
+            continue
+        checked += 1
+        for gap in find_gaps(image, page) + check_assembly(page, docx_path, image):
+            if gap.severity == ERROR:
+                errors += 1
+                kinds[gap.kind] = kinds.get(gap.kind, 0) + 1
+            else:
+                reviews += 1
+    if not checked:
+        return
+    logger.info(
+        "gap_check job=%s pages=%d errors=%d review=%d kinds=%s",
+        job.id,
+        checked,
+        errors,
+        reviews,
+        kinds,
+    )
+    store.record_quality(
+        job_id=job.id,
+        owner_user_id=job.owner_user_id,
+        pages_checked=checked,
+        errors=errors,
+        reviews=reviews,
+        kinds=kinds,
+    )
 
 
 def _process_job_sync(
@@ -159,14 +239,30 @@ def _process_job_sync(
     """
     source = Path(input_path)
     classified = classify_elements(get_extractor(source, selection).extract(source))
+    report = _job_report.get()  # set by the worker; None when called directly
+    if report is not None:
+        report.images = [
+            item.element.raw_content
+            for item in classified
+            if item.element.element_kind == ElementKind.IMAGE
+            and item.element.metadata.get("whole_page")
+            and isinstance(item.element.raw_content, bytes)
+        ]
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if budget is None:
         budget = VisionBudget(limit=_vision_limit(input_path, selection))
-    vision = CachedVisionProvider(
-        factory=lambda: vision_pkg.get_vision_provider(budget)
-    )
+
+    def make_provider() -> VisionProvider:
+        provider = vision_pkg.get_vision_provider(budget)
+        if report is None:
+            return provider
+        recorder = RecordingProvider(provider)  # keeps every answer for the report
+        report.answers = recorder.results
+        return recorder
+
+    vision = CachedVisionProvider(factory=make_provider)
     document = assemble_docx(classified, vision_provider=vision)
     docx_path = output_dir / "output.docx"
     document.save(str(docx_path))
@@ -175,6 +271,8 @@ def _process_job_sync(
     pptx_path = output_dir / "output.pptx"
     prs.save(str(pptx_path))
 
+    if report is not None:
+        report.docx_path = docx_path
     return str(docx_path), str(pptx_path)
 
 
@@ -199,6 +297,8 @@ async def _worker_loop(store: JobStore) -> None:
         calls_before = budget.used
         started = time.monotonic()
         claimed = job
+        report = JobReport()
+        report_token = _job_report.set(report)
 
         try:
             args: tuple[object, ...] = (job.input_path, output_dir, budget)
@@ -217,6 +317,7 @@ async def _worker_loop(store: JobStore) -> None:
             )
             _record_usage(store, claimed, budget, calls_before, started, "completed")
             logger.info("Job %s completed", job.id)
+            await asyncio.to_thread(_after_job, store, claimed, report)
         except VisionBudgetExceededError:
             # Terminal: re-running would only spend more, so no retry.
             store.update_job(
@@ -260,6 +361,8 @@ async def _worker_loop(store: JobStore) -> None:
                 )
                 _record_usage(store, claimed, budget, calls_before, started, "failed")
                 logger.error("Job %s failed permanently: %s", job.id, exc)
+        finally:
+            _job_report.reset(report_token)
 
 
 async def start_worker(store: JobStore) -> asyncio.Task[None]:

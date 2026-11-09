@@ -69,7 +69,7 @@ def _truncate_all() -> None:
     with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
         conn.execute(
             "TRUNCATE TABLE jobs, users, refresh_tokens, job_submissions, "
-            "job_usage RESTART IDENTITY CASCADE"
+            "job_usage, job_quality RESTART IDENTITY CASCADE"
         )
 
 
